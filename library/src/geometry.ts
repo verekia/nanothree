@@ -192,11 +192,22 @@ export class BufferGeometry {
       this._indexCount = idx.length
       this._indexFormat = idx instanceof Uint32Array ? 'uint32' : 'uint16'
       if (this._indexBuffer) this._indexBuffer.destroy()
+      // writeBuffer requires byte count to be a multiple of 4.
+      // Uint16Array with an odd number of elements has byteLength % 4 == 2.
+      // Pad to 4-byte alignment by copying into a larger buffer when needed.
+      const byteLen = idx.byteLength
+      const alignedSize = (byteLen + 3) & ~3
       this._indexBuffer = device.createBuffer({
-        size: idx.byteLength,
+        size: alignedSize,
         usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
       })
-      device.queue.writeBuffer(this._indexBuffer, 0, idx as unknown as ArrayBuffer)
+      if (byteLen === alignedSize) {
+        device.queue.writeBuffer(this._indexBuffer, 0, idx as unknown as ArrayBuffer)
+      } else {
+        const padded = new Uint8Array(alignedSize)
+        padded.set(new Uint8Array(idx.buffer, idx.byteOffset, byteLen))
+        device.queue.writeBuffer(this._indexBuffer, 0, padded as unknown as ArrayBuffer)
+      }
     } else {
       this._indexCount = 0
       if (this._indexBuffer) {
@@ -235,11 +246,19 @@ export class BufferGeometry {
 
     this._wireframeIndexCount = wireIndices.length
     if (this._wireframeIndexBuffer) this._wireframeIndexBuffer.destroy()
+    const wByteLen = wireIndices.byteLength
+    const wAlignedSize = (wByteLen + 3) & ~3
     this._wireframeIndexBuffer = device.createBuffer({
-      size: wireIndices.byteLength,
+      size: wAlignedSize,
       usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
     })
-    device.queue.writeBuffer(this._wireframeIndexBuffer, 0, wireIndices as unknown as ArrayBuffer)
+    if (wByteLen === wAlignedSize) {
+      device.queue.writeBuffer(this._wireframeIndexBuffer, 0, wireIndices as unknown as ArrayBuffer)
+    } else {
+      const wPadded = new Uint8Array(wAlignedSize)
+      wPadded.set(new Uint8Array(wireIndices.buffer, wireIndices.byteOffset, wByteLen))
+      device.queue.writeBuffer(this._wireframeIndexBuffer, 0, wPadded as unknown as ArrayBuffer)
+    }
     this._wireframeDirty = false
   }
 
