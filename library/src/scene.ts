@@ -130,11 +130,12 @@ export class Scene extends Object3D {
     const wy = m[1] * lx + m[5] * ly + m[9] * lz + m[13]
     const wz = m[2] * lx + m[6] * ly + m[10] * lz + m[14]
 
-    // Scale the radius by the maximum axis scale of the world matrix
-    const sx = Math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
-    const sy = Math.sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6])
-    const sz = Math.sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10])
-    const maxScale = Math.max(sx, sy, sz)
+    // Scale the radius by the maximum axis scale of the world matrix.
+    // Compare squared lengths to find the max, then take a single sqrt.
+    const sx2 = m[0] * m[0] + m[1] * m[1] + m[2] * m[2]
+    const sy2 = m[4] * m[4] + m[5] * m[5] + m[6] * m[6]
+    const sz2 = m[8] * m[8] + m[9] * m[9] + m[10] * m[10]
+    const maxScale = Math.sqrt(Math.max(sx2, sy2, sz2))
 
     return sphereInFrustum(this._frustumPlanes, wx, wy, wz, bs.radius * maxScale)
   }

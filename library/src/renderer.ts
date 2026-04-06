@@ -860,6 +860,20 @@ export class WebGPURenderer {
   private objectStaging!: Float32Array
   private capacity = INITIAL_CAPACITY
 
+  // Pre-allocated per-frame classification arrays (reused to avoid GC pressure)
+  private _solidMeshes: Mesh[] = []
+  private _texturedMeshes: Mesh[] = []
+  private _vertexColorMeshes: Mesh[] = []
+  private _vertexColorBasicMeshes: Mesh[] = []
+  private _basicMeshes: Mesh[] = []
+  private _wireframeMeshes: Mesh[] = []
+  private _customMeshes: Mesh[] = []
+  private _lines: Line[] = []
+  private _skinnedSolid: SkinnedMesh[] = []
+  private _skinnedTextured: SkinnedMesh[] = []
+  private _normalSprites: Sprite[] = []
+  private _additiveSprites: Sprite[] = []
+
   // Render pass descriptors (reused every frame)
   private colorAtt: GPURenderPassColorAttachment
   private depthAtt: GPURenderPassDepthStencilAttachment
@@ -1440,14 +1454,14 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     // Single-pass traversal: compute world matrices + collect renderables + frustum cull
     scene.updateMatrixWorld(camera.viewProjection)
 
-    const solidMeshes: Mesh[] = []
-    const texturedMeshes: Mesh[] = []
-    const vertexColorMeshes: Mesh[] = []
-    const vertexColorBasicMeshes: Mesh[] = []
-    const basicMeshes: Mesh[] = []
-    const wireframeMeshes: Mesh[] = []
-    const customMeshes: Mesh[] = []
-    const lines: Line[] = []
+    const solidMeshes = this._solidMeshes; solidMeshes.length = 0
+    const texturedMeshes = this._texturedMeshes; texturedMeshes.length = 0
+    const vertexColorMeshes = this._vertexColorMeshes; vertexColorMeshes.length = 0
+    const vertexColorBasicMeshes = this._vertexColorBasicMeshes; vertexColorBasicMeshes.length = 0
+    const basicMeshes = this._basicMeshes; basicMeshes.length = 0
+    const wireframeMeshes = this._wireframeMeshes; wireframeMeshes.length = 0
+    const customMeshes = this._customMeshes; customMeshes.length = 0
+    const lines = this._lines; lines.length = 0
 
     for (let i = 0; i < scene.meshes.length; i++) {
       const m = scene.meshes[i]
@@ -1465,8 +1479,8 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     for (let i = 0; i < scene.lines.length; i++) lines.push(scene.lines[i])
 
     // Classify skinned meshes (solid vs textured)
-    const skinnedSolid: SkinnedMesh[] = []
-    const skinnedTextured: SkinnedMesh[] = []
+    const skinnedSolid = this._skinnedSolid; skinnedSolid.length = 0
+    const skinnedTextured = this._skinnedTextured; skinnedTextured.length = 0
     for (let i = 0; i < scene.skinnedMeshes.length; i++) {
       const sm = scene.skinnedMeshes[i]
       if ((sm.material as MeshLambertMaterial).hasTexture) skinnedTextured.push(sm)
@@ -1474,8 +1488,8 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     }
 
     // Split transparent sprites by blending mode (opaque sprites are ignored for now)
-    const normalSprites: Sprite[] = []
-    const additiveSprites: Sprite[] = []
+    const normalSprites = this._normalSprites; normalSprites.length = 0
+    const additiveSprites = this._additiveSprites; additiveSprites.length = 0
     for (let i = 0; i < scene.sprites.length; i++) {
       const s = scene.sprites[i]
       if (!s.material.transparent) continue
@@ -1619,8 +1633,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
       this.writeObjectData(idx, l._worldMatrix, l.material.color.r, l.material.color.g, l.material.color.b)
     }
     // Stage sprite data with billboard matrices
-    const spriteList = normalSprites.concat(additiveSprites)
-    if (spriteList.length > 0) {
+    if (normalSpriteCount + additiveSpriteCount > 0) {
       // Camera right/up/forward from camera world matrix (column-major)
       const cm = camera._worldMatrix
       const crx = cm[0],
@@ -1633,38 +1646,42 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         cfy = cm[9],
         cfz = cm[10] // forward
 
-      for (let i = 0; i < spriteList.length; i++, idx++) {
-        const s = spriteList[i]
-        const m = s._worldMatrix
-        // Extract world position
-        const px = m[12],
-          py = m[13],
-          pz = m[14]
-        // Extract uniform scale (length of first column)
-        const sx = Math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
-        const sy = Math.sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6])
-        // Build billboard matrix (column-major)
-        const off = idx * this.objectFloatStride
-        this.objectStaging[off] = crx * sx
-        this.objectStaging[off + 1] = cry * sx
-        this.objectStaging[off + 2] = crz * sx
-        this.objectStaging[off + 3] = 0
-        this.objectStaging[off + 4] = cux * sy
-        this.objectStaging[off + 5] = cuy * sy
-        this.objectStaging[off + 6] = cuz * sy
-        this.objectStaging[off + 7] = 0
-        this.objectStaging[off + 8] = cfx
-        this.objectStaging[off + 9] = cfy
-        this.objectStaging[off + 10] = cfz
-        this.objectStaging[off + 11] = 0
-        this.objectStaging[off + 12] = px
-        this.objectStaging[off + 13] = py
-        this.objectStaging[off + 14] = pz
-        this.objectStaging[off + 15] = 1
-        this.objectStaging[off + 16] = s.material.color.r
-        this.objectStaging[off + 17] = s.material.color.g
-        this.objectStaging[off + 18] = s.material.color.b
-        this.objectStaging[off + 19] = s.material.opacity
+      // Stage normal sprites, then additive sprites (matching draw order)
+      for (let list = 0; list < 2; list++) {
+        const sprites = list === 0 ? normalSprites : additiveSprites
+        for (let i = 0; i < sprites.length; i++, idx++) {
+          const s = sprites[i]
+          const m = s._worldMatrix
+          // Extract world position
+          const px = m[12],
+            py = m[13],
+            pz = m[14]
+          // Extract uniform scale (length of first column)
+          const sx = Math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
+          const sy = Math.sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6])
+          // Build billboard matrix (column-major)
+          const off = idx * this.objectFloatStride
+          this.objectStaging[off] = crx * sx
+          this.objectStaging[off + 1] = cry * sx
+          this.objectStaging[off + 2] = crz * sx
+          this.objectStaging[off + 3] = 0
+          this.objectStaging[off + 4] = cux * sy
+          this.objectStaging[off + 5] = cuy * sy
+          this.objectStaging[off + 6] = cuz * sy
+          this.objectStaging[off + 7] = 0
+          this.objectStaging[off + 8] = cfx
+          this.objectStaging[off + 9] = cfy
+          this.objectStaging[off + 10] = cfz
+          this.objectStaging[off + 11] = 0
+          this.objectStaging[off + 12] = px
+          this.objectStaging[off + 13] = py
+          this.objectStaging[off + 14] = pz
+          this.objectStaging[off + 15] = 1
+          this.objectStaging[off + 16] = s.material.color.r
+          this.objectStaging[off + 17] = s.material.color.g
+          this.objectStaging[off + 18] = s.material.color.b
+          this.objectStaging[off + 19] = s.material.opacity
+        }
       }
     }
     // Stage instanced sprite world matrices (one slot per InstancedSprite)
@@ -1686,11 +1703,13 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     for (let i = 0; i < instancedSpriteCount; i++) instancedSprites[i]._ensureGPU(this.device, this.instanceLayout)
 
     // Update skinned mesh bone matrices and GPU buffers
-    const allSkinned = skinnedSolid.concat(skinnedTextured)
-    for (let i = 0; i < allSkinned.length; i++) {
-      const sm = allSkinned[i]
-      sm._updateBoneMatrices()
-      sm._ensureBoneGPU(this.device, this.instanceLayout)
+    for (let i = 0; i < skinnedSolidCount; i++) {
+      skinnedSolid[i]._updateBoneMatrices()
+      skinnedSolid[i]._ensureBoneGPU(this.device, this.instanceLayout)
+    }
+    for (let i = 0; i < skinnedTexturedCount; i++) {
+      skinnedTextured[i]._updateBoneMatrices()
+      skinnedTextured[i]._ensureBoneGPU(this.device, this.instanceLayout)
     }
 
     const encoder = this.device.createCommandEncoder()
