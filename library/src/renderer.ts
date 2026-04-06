@@ -13,6 +13,7 @@ import { BackSide, DoubleSide, MeshBasicMaterial, type NanoTexture } from './mat
 import { mat4Ortho, mat4LookAt, mat4Multiply } from './math'
 import { ShaderMaterial } from './shader-material'
 import { AdditiveBlending } from './sprite'
+import { createFrustumPlanes, extractFrustumPlanes } from './frustum'
 
 import type { PerspectiveCamera } from './core'
 import type { BufferGeometry } from './geometry'
@@ -692,6 +693,65 @@ struct ObjectData { model: mat4x4f, color: vec4f }
 
 const OBJECT_FLOATS = 20
 const INITIAL_CAPACITY = 1024
+const INDIRECT_ARGS = 5 // 5 × u32 per drawIndexedIndirect command
+const INDIRECT_STRIDE = INDIRECT_ARGS * 4 // 20 bytes
+const SPHERE_FLOATS = 4 // cx, cy, cz, radius
+const CULL_WORKGROUP = 64
+
+// ─── Frustum culling compute shader ──────────────────────────────────
+
+const FRUSTUM_CULL_SHADER = /* wgsl */ `
+struct CullUniforms {
+  planes: array<vec4f, 6>,
+  count: u32,
+}
+
+@group(0) @binding(0) var<uniform> cull: CullUniforms;
+@group(0) @binding(1) var<storage, read> objectData: array<vec4f>;
+@group(0) @binding(2) var<storage, read> spheres: array<vec4f>;
+@group(0) @binding(3) var<storage, read_write> draws: array<u32>;
+
+override objectVec4Stride: u32;
+
+@compute @workgroup_size(${CULL_WORKGROUP})
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= cull.count) { return; }
+
+  let s = spheres[i];
+
+  // Negative radius means skip culling (sprites, instanced meshes)
+  if (s.w < 0.0) { return; }
+
+  // Read world matrix columns from objectData (column-major)
+  let base = i * objectVec4Stride;
+  let col0 = objectData[base];
+  let col1 = objectData[base + 1u];
+  let col2 = objectData[base + 2u];
+  let col3 = objectData[base + 3u];
+
+  // Transform bounding sphere center to world space
+  let wx = col0.x * s.x + col1.x * s.y + col2.x * s.z + col3.x;
+  let wy = col0.y * s.x + col1.y * s.y + col2.y * s.z + col3.y;
+  let wz = col0.z * s.x + col1.z * s.y + col2.z * s.z + col3.z;
+
+  // Scale radius by max axis scale of the world matrix
+  let sx = length(col0.xyz);
+  let sy = length(col1.xyz);
+  let sz = length(col2.xyz);
+  let r = s.w * max(sx, max(sy, sz));
+
+  // Test against 6 frustum planes — cull if entirely outside any plane
+  for (var p = 0u; p < 6u; p++) {
+    let plane = cull.planes[p];
+    let dist = dot(plane.xyz, vec3f(wx, wy, wz)) + plane.w;
+    if (dist < -r) {
+      draws[i * 5u + 1u] = 0u;
+      return;
+    }
+  }
+}
+`
 const SHADOW_MAP_SIZE = 2048
 const SHADOW_BIAS = 0.003
 
@@ -823,6 +883,18 @@ export class WebGPURenderer {
   private sceneBuffer!: GPUBuffer
   private objectBuffer!: GPUBuffer
 
+  // Compute frustum culling
+  private cullPipeline!: GPUComputePipeline
+  private cullLayout!: GPUBindGroupLayout
+  private cullBindGroup!: GPUBindGroup
+  private frustumBuffer!: GPUBuffer
+  private frustumStaging = new Float32Array(28) // 6 planes (24 floats) + count as u32 + padding
+  private frustumPlanes = createFrustumPlanes()
+  private sphereBuffer!: GPUBuffer
+  private sphereStaging!: Float32Array
+  private indirectBuffer!: GPUBuffer
+  private indirectStaging!: Uint32Array
+
   // Main pass bind groups / layouts
   private sceneLayout!: GPUBindGroupLayout
   private objectLayout!: GPUBindGroupLayout
@@ -912,11 +984,14 @@ export class WebGPURenderer {
     this.objectStride = Math.ceil((OBJECT_FLOATS * 4) / align) * align
     this.objectFloatStride = this.objectStride / 4
     this.objectStaging = new Float32Array(INITIAL_CAPACITY * this.objectFloatStride)
+    this.sphereStaging = new Float32Array(INITIAL_CAPACITY * SPHERE_FLOATS)
+    this.indirectStaging = new Uint32Array(INITIAL_CAPACITY * INDIRECT_ARGS)
 
     this.createBindGroupLayouts()
     this.createShadowResources()
     this.createTextureResources()
     this.createBuiltinPipelines()
+    this.createCullPipeline()
     this.createBuffers(INITIAL_CAPACITY)
     this.createBindGroups()
     this.ensureDepthTexture()
@@ -991,6 +1066,29 @@ export class WebGPURenderer {
     })
     this.skinnedShadowPipelineLayout = this.device.createPipelineLayout({
       bindGroupLayouts: [this.shadowSceneLayout, this.objectLayout, this.instanceLayout],
+    })
+
+    // Compute frustum culling bind group layout
+    this.cullLayout = this.device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      ],
+    })
+  }
+
+  private createCullPipeline() {
+    const cullPipelineLayout = this.device.createPipelineLayout({
+      bindGroupLayouts: [this.cullLayout],
+    })
+    this.cullPipeline = this.device.createComputePipeline({
+      layout: cullPipelineLayout,
+      compute: {
+        module: this.device.createShaderModule({ code: FRUSTUM_CULL_SHADER }),
+        constants: { objectVec4Stride: this.objectFloatStride / 4 },
+      },
     })
   }
 
@@ -1351,6 +1449,19 @@ struct ObjectData { model: mat4x4f, color: vec4f }
       size: capacity * this.objectStride,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
+    // CullUniforms: 6 × vec4f (96) + u32 count (4) + padding to 112
+    this.frustumBuffer = this.device.createBuffer({
+      size: 112,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    })
+    this.sphereBuffer = this.device.createBuffer({
+      size: capacity * SPHERE_FLOATS * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    })
+    this.indirectBuffer = this.device.createBuffer({
+      size: capacity * INDIRECT_STRIDE,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
+    })
   }
 
   private createBindGroups() {
@@ -1365,6 +1476,15 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     this.objectBindGroup = this.device.createBindGroup({
       layout: this.objectLayout,
       entries: [{ binding: 0, resource: { buffer: this.objectBuffer, size: OBJECT_FLOATS * 4 } }],
+    })
+    this.cullBindGroup = this.device.createBindGroup({
+      layout: this.cullLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.frustumBuffer } },
+        { binding: 1, resource: { buffer: this.objectBuffer } },
+        { binding: 2, resource: { buffer: this.sphereBuffer } },
+        { binding: 3, resource: { buffer: this.indirectBuffer } },
+      ],
     })
   }
 
@@ -1388,14 +1508,35 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     while (newCap < needed) newCap *= 2
     this.capacity = newCap
     this.objectStaging = new Float32Array(newCap * this.objectFloatStride)
+    this.sphereStaging = new Float32Array(newCap * SPHERE_FLOATS)
+    this.indirectStaging = new Uint32Array(newCap * INDIRECT_ARGS)
     this.objectBuffer.destroy()
     this.objectBuffer = this.device.createBuffer({
       size: newCap * this.objectStride,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
+    this.sphereBuffer.destroy()
+    this.sphereBuffer = this.device.createBuffer({
+      size: newCap * SPHERE_FLOATS * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    })
+    this.indirectBuffer.destroy()
+    this.indirectBuffer = this.device.createBuffer({
+      size: newCap * INDIRECT_STRIDE,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
+    })
     this.objectBindGroup = this.device.createBindGroup({
       layout: this.objectLayout,
       entries: [{ binding: 0, resource: { buffer: this.objectBuffer, size: OBJECT_FLOATS * 4 } }],
+    })
+    this.cullBindGroup = this.device.createBindGroup({
+      layout: this.cullLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.frustumBuffer } },
+        { binding: 1, resource: { buffer: this.objectBuffer } },
+        { binding: 2, resource: { buffer: this.sphereBuffer } },
+        { binding: 3, resource: { buffer: this.indirectBuffer } },
+      ],
     })
   }
 
@@ -1418,6 +1559,39 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     this.objectStaging[off + 19] = 1
   }
 
+  /** Write bounding sphere (local-space) for compute frustum culling. */
+  private writeSphereData(
+    idx: number,
+    geo: { boundingSphere: { cx: number; cy: number; cz: number; radius: number } | null; computeBoundingSphere(): void },
+  ) {
+    if (!geo.boundingSphere) geo.computeBoundingSphere()
+    const bs = geo.boundingSphere!
+    const off = idx * SPHERE_FLOATS
+    this.sphereStaging[off] = bs.cx
+    this.sphereStaging[off + 1] = bs.cy
+    this.sphereStaging[off + 2] = bs.cz
+    this.sphereStaging[off + 3] = bs.radius
+  }
+
+  /** Mark this slot as bypass (no compute culling — sprites, instanced). */
+  private writeBypassSphere(idx: number) {
+    const off = idx * SPHERE_FLOATS
+    this.sphereStaging[off] = 0
+    this.sphereStaging[off + 1] = 0
+    this.sphereStaging[off + 2] = 0
+    this.sphereStaging[off + 3] = -1
+  }
+
+  /** Write indirect draw args for drawIndexedIndirect. */
+  private writeIndirectArgs(idx: number, indexCount: number, instanceCount: number) {
+    const off = idx * INDIRECT_ARGS
+    this.indirectStaging[off] = indexCount
+    this.indirectStaging[off + 1] = instanceCount
+    this.indirectStaging[off + 2] = 0
+    this.indirectStaging[off + 3] = 0
+    this.indirectStaging[off + 4] = 0
+  }
+
   // ── Main render ───────────────────────────────────────────────────
 
   render(scene: Scene, camera: PerspectiveCamera) {
@@ -1437,8 +1611,9 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     // Compute VP before traversal so frustum culling can use it
     camera.updateViewProjection(w / h)
 
-    // Single-pass traversal: compute world matrices + collect renderables + frustum cull
-    scene.updateMatrixWorld(camera.viewProjection)
+    // Single-pass traversal: compute world matrices + collect renderables
+    // (frustum culling is now done on GPU via compute shader)
+    scene.updateMatrixWorld()
 
     const solidMeshes: Mesh[] = []
     const texturedMeshes: Mesh[] = []
@@ -1571,54 +1746,78 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     sd[55] = 0
     this.device.queue.writeBuffer(this.sceneBuffer, 0, sd as unknown as ArrayBuffer)
 
-    // ── Stage object data (world matrices already computed by updateMatrixWorld) ──
-    // Order: solid, textured, vcMeshes, vcBasicMeshes, instanced, basic, wireframe, custom, lines, normalSprites, additiveSprites, instancedSprites
+    // ── Stage object data + sphere/indirect data for compute culling ──
+    // Order: solid, textured, skinnedSolid, skinnedTextured, vc, vcBasic, instanced, basic, wireframe, custom, lines, normalSprites, additiveSprites, instancedSprites
     let idx = 0
     for (let i = 0; i < solidCount; i++, idx++) {
       const m = solidMeshes[i]
       this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      this.writeSphereData(idx, m.geometry)
+      this.writeIndirectArgs(idx, m.geometry.indices?.length ?? 0, 1)
     }
     for (let i = 0; i < texturedCount; i++, idx++) {
       const m = texturedMeshes[i]
       this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      this.writeSphereData(idx, m.geometry)
+      this.writeIndirectArgs(idx, m.geometry.indices?.length ?? 0, 1)
     }
     for (let i = 0; i < skinnedSolidCount; i++, idx++) {
       const m = skinnedSolid[i]
       this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      this.writeSphereData(idx, m.geometry)
+      this.writeIndirectArgs(idx, m.geometry.indices?.length ?? 0, 1)
     }
     for (let i = 0; i < skinnedTexturedCount; i++, idx++) {
       const m = skinnedTextured[i]
       this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      this.writeSphereData(idx, m.geometry)
+      this.writeIndirectArgs(idx, m.geometry.indices?.length ?? 0, 1)
     }
     for (let i = 0; i < vcCount; i++, idx++) {
       const m = vertexColorMeshes[i]
       this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      this.writeSphereData(idx, m.geometry)
+      this.writeIndirectArgs(idx, m.geometry.indices?.length ?? 0, 1)
     }
     for (let i = 0; i < vcBasicCount; i++, idx++) {
       const m = vertexColorBasicMeshes[i]
       this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      this.writeSphereData(idx, m.geometry)
+      this.writeIndirectArgs(idx, m.geometry.indices?.length ?? 0, 1)
     }
     for (let i = 0; i < instancedCount; i++, idx++) {
       const m = instancedMeshes[i]
       this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      this.writeBypassSphere(idx)
+      this.writeIndirectArgs(idx, m.geometry.indices?.length ?? 0, m.count)
     }
     for (let i = 0; i < basicCount; i++, idx++) {
       const m = basicMeshes[i]
       this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      this.writeSphereData(idx, m.geometry)
+      this.writeIndirectArgs(idx, m.geometry.indices?.length ?? 0, 1)
     }
     for (let i = 0; i < wireCount; i++, idx++) {
       const m = wireframeMeshes[i]
       this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      this.writeSphereData(idx, m.geometry)
+      // Wireframe index count = triangle indices × 2
+      this.writeIndirectArgs(idx, (m.geometry.indices?.length ?? 0) * 2, 1)
     }
     for (let i = 0; i < customCount; i++, idx++) {
       const m = customMeshes[i]
       this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      this.writeSphereData(idx, m.geometry)
+      const isWire = (m.material as ShaderMaterial).wireframe
+      this.writeIndirectArgs(idx, (m.geometry.indices?.length ?? 0) * (isWire ? 2 : 1), 1)
     }
     for (let i = 0; i < lineCount; i++, idx++) {
       const l = lines[i]
       this.writeObjectData(idx, l._worldMatrix, l.material.color.r, l.material.color.g, l.material.color.b)
+      this.writeSphereData(idx, l.geometry)
+      this.writeIndirectArgs(idx, l.geometry.indices?.length ?? 0, 1)
     }
-    // Stage sprite data with billboard matrices
+    // Stage sprite data with billboard matrices (bypass compute culling)
     const spriteList = normalSprites.concat(additiveSprites)
     if (spriteList.length > 0) {
       // Camera right/up/forward from camera world matrix (column-major)
@@ -1665,13 +1864,19 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         this.objectStaging[off + 17] = s.material.color.g
         this.objectStaging[off + 18] = s.material.color.b
         this.objectStaging[off + 19] = s.material.opacity
+        this.writeBypassSphere(idx)
+        this.writeIndirectArgs(idx, 6, 1) // PlaneGeometry = 2 triangles = 6 indices
       }
     }
     // Stage instanced sprite world matrices (one slot per InstancedSprite)
     for (let i = 0; i < instancedSpriteCount; i++, idx++) {
       const is = instancedSprites[i]
       this.writeObjectData(idx, is._worldMatrix, 1, 1, 1)
+      this.writeBypassSphere(idx)
+      this.writeIndirectArgs(idx, 6, is.count) // PlaneGeometry = 6 indices
     }
+
+    // ── Upload buffers to GPU ──
     this.device.queue.writeBuffer(
       this.objectBuffer,
       0,
@@ -1679,6 +1884,26 @@ struct ObjectData { model: mat4x4f, color: vec4f }
       0,
       totalCount * this.objectStride,
     )
+    this.device.queue.writeBuffer(
+      this.sphereBuffer,
+      0,
+      this.sphereStaging.buffer as unknown as ArrayBuffer,
+      0,
+      totalCount * SPHERE_FLOATS * 4,
+    )
+    this.device.queue.writeBuffer(
+      this.indirectBuffer,
+      0,
+      this.indirectStaging.buffer as unknown as ArrayBuffer,
+      0,
+      totalCount * INDIRECT_STRIDE,
+    )
+
+    // ── Upload frustum planes for compute culling ──
+    extractFrustumPlanes(this.frustumPlanes, camera.viewProjection)
+    this.frustumStaging.set(this.frustumPlanes, 0)
+    new Uint32Array(this.frustumStaging.buffer, 96, 1)[0] = totalCount
+    this.device.queue.writeBuffer(this.frustumBuffer, 0, this.frustumStaging as unknown as ArrayBuffer)
 
     for (let i = 0; i < customCount; i++)
       (customMeshes[i].material as ShaderMaterial)._ensureGPU(this.device, this.customUniformLayout)
@@ -1694,6 +1919,15 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     }
 
     const encoder = this.device.createCommandEncoder()
+
+    // ── Compute frustum culling pass ────────────────────────────
+    {
+      const cp = encoder.beginComputePass()
+      cp.setPipeline(this.cullPipeline)
+      cp.setBindGroup(0, this.cullBindGroup)
+      cp.dispatchWorkgroups(Math.ceil(totalCount / CULL_WORKGROUP))
+      cp.end()
+    }
 
     // ── Shadow depth pass ───────────────────────────────────────
     if (shadowsOn) {
@@ -1713,7 +1947,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           sp.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
         sp.setBindGroup(1, this.objectBindGroup, [i * this.objectStride])
-        sp.drawIndexed(geo._indexCount)
+        sp.drawIndexedIndirect(this.indirectBuffer, i * INDIRECT_STRIDE)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
       }
@@ -1729,7 +1963,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           sp.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
         sp.setBindGroup(1, this.objectBindGroup, [(solidCount + i) * this.objectStride])
-        sp.drawIndexed(geo._indexCount)
+        sp.drawIndexedIndirect(this.indirectBuffer, (solidCount + i) * INDIRECT_STRIDE)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
       }
@@ -1751,7 +1985,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           }
           sp.setBindGroup(1, this.objectBindGroup, [(skBase + i) * this.objectStride])
           sp.setBindGroup(2, sm._boneBindGroup!)
-          sp.drawIndexed(geo._indexCount)
+          sp.drawIndexedIndirect(this.indirectBuffer, (skBase + i) * INDIRECT_STRIDE)
           this.info.drawCalls++
           this.info.triangles += (geo._indexCount / 3) | 0
         }
@@ -1774,7 +2008,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
             sp.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
           }
           sp.setBindGroup(1, this.objectBindGroup, [(vcBase + i) * this.objectStride])
-          sp.drawIndexed(geo._indexCount)
+          sp.drawIndexedIndirect(this.indirectBuffer, (vcBase + i) * INDIRECT_STRIDE)
           this.info.drawCalls++
           this.info.triangles += (geo._indexCount / 3) | 0
         }
@@ -1788,7 +2022,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
             sp.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
           }
           sp.setBindGroup(1, this.objectBindGroup, [(vcBase + vcCount + i) * this.objectStride])
-          sp.drawIndexed(geo._indexCount)
+          sp.drawIndexedIndirect(this.indirectBuffer, (vcBase + vcCount + i) * INDIRECT_STRIDE)
           this.info.drawCalls++
           this.info.triangles += (geo._indexCount / 3) | 0
         }
@@ -1812,7 +2046,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           }
           sp.setBindGroup(1, this.objectBindGroup, [(instBase + i) * this.objectStride])
           sp.setBindGroup(2, im._instanceBindGroup!)
-          sp.drawIndexed(geo._indexCount, im.count)
+          sp.drawIndexedIndirect(this.indirectBuffer, (instBase + i) * INDIRECT_STRIDE)
           this.info.drawCalls++
           this.info.triangles += ((geo._indexCount / 3) | 0) * im.count
         }
@@ -1840,7 +2074,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           sp.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
         sp.setBindGroup(1, this.objectBindGroup, [(customBase + i) * this.objectStride])
-        sp.drawIndexed(geo._indexCount)
+        sp.drawIndexedIndirect(this.indirectBuffer, (customBase + i) * INDIRECT_STRIDE)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
       }
@@ -1878,7 +2112,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
         pass.setBindGroup(1, this.objectBindGroup, [i * this.objectStride])
-        pass.drawIndexed(geo._indexCount)
+        pass.drawIndexedIndirect(this.indirectBuffer, i * INDIRECT_STRIDE)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
       }
@@ -1911,7 +2145,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         }
         pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
         pass.setBindGroup(2, this.getTextureBindGroup(mat.map!))
-        pass.drawIndexed(geo._indexCount)
+        pass.drawIndexedIndirect(this.indirectBuffer, (base + i) * INDIRECT_STRIDE)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
       }
@@ -1945,7 +2179,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         }
         pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
         pass.setBindGroup(2, sm._boneBindGroup!)
-        pass.drawIndexed(geo._indexCount)
+        pass.drawIndexedIndirect(this.indirectBuffer, (base + i) * INDIRECT_STRIDE)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
       }
@@ -1980,7 +2214,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
         pass.setBindGroup(2, sm._boneBindGroup!)
         pass.setBindGroup(3, this.getTextureBindGroup(mat.map!))
-        pass.drawIndexed(geo._indexCount)
+        pass.drawIndexedIndirect(this.indirectBuffer, (base + i) * INDIRECT_STRIDE)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
       }
@@ -2012,7 +2246,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
         pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
-        pass.drawIndexed(geo._indexCount)
+        pass.drawIndexedIndirect(this.indirectBuffer, (base + i) * INDIRECT_STRIDE)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
       }
@@ -2044,7 +2278,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
         pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
-        pass.drawIndexed(geo._indexCount)
+        pass.drawIndexedIndirect(this.indirectBuffer, (base + i) * INDIRECT_STRIDE)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
       }
@@ -2069,7 +2303,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
         pass.setBindGroup(2, im._instanceBindGroup!)
-        pass.drawIndexed(geo._indexCount, im.count)
+        pass.drawIndexedIndirect(this.indirectBuffer, (base + i) * INDIRECT_STRIDE)
         this.info.drawCalls++
         this.info.triangles += ((geo._indexCount / 3) | 0) * im.count
       }
@@ -2102,7 +2336,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
         pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
-        pass.drawIndexed(geo._indexCount)
+        pass.drawIndexedIndirect(this.indirectBuffer, (base + i) * INDIRECT_STRIDE)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
       }
@@ -2130,7 +2364,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setIndexBuffer(geo._wireframeIndexBuffer!, geo._wireframeIndexFormat)
         }
         pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
-        pass.drawIndexed(geo._wireframeIndexCount)
+        pass.drawIndexedIndirect(this.indirectBuffer, (base + i) * INDIRECT_STRIDE)
         this.info.drawCalls++
       }
     }
@@ -2173,9 +2407,9 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         }
         pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
         if (mat._uniformBindGroup) pass.setBindGroup(2, mat._uniformBindGroup)
-        const idxCount = mat.wireframe ? geo._wireframeIndexCount : geo._indexCount
-        pass.drawIndexed(idxCount)
+        pass.drawIndexedIndirect(this.indirectBuffer, (base + i) * INDIRECT_STRIDE)
         this.info.drawCalls++
+        const idxCount = mat.wireframe ? geo._wireframeIndexCount : geo._indexCount
         if (!mat.wireframe) this.info.triangles += (idxCount / 3) | 0
       }
     }
@@ -2204,13 +2438,13 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           if (geo._indexBuffer) pass.setIndexBuffer(geo._indexBuffer, geo._indexFormat)
         }
         pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
-        if (geo._indexCount > 0) pass.drawIndexed(geo._indexCount)
+        if (geo._indexCount > 0) pass.drawIndexedIndirect(this.indirectBuffer, (base + i) * INDIRECT_STRIDE)
         else pass.draw(geo._vertexCount)
         this.info.drawCalls++
       }
     }
 
-    // 7: sprites (alpha-blended, rendered after all opaque geometry)
+    // 7: sprites (alpha-blended, rendered after all opaque geometry — bypass compute culling)
     if (normalSpriteCount + additiveSpriteCount > 0) {
       if (!this.spriteGeometry) this.spriteGeometry = new PlaneGeometry(1, 1)
       const geo = this.spriteGeometry
@@ -2234,7 +2468,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         pass.setPipeline(this.spriteNormalPipeline)
         for (let i = 0; i < normalSpriteCount; i++) {
           pass.setBindGroup(1, this.objectBindGroup, [(spriteBase + i) * this.objectStride])
-          pass.drawIndexed(geo._indexCount)
+          pass.drawIndexedIndirect(this.indirectBuffer, (spriteBase + i) * INDIRECT_STRIDE)
           this.info.drawCalls++
           this.info.triangles += 2
         }
@@ -2243,7 +2477,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         pass.setPipeline(this.spriteAdditivePipeline)
         for (let i = 0; i < additiveSpriteCount; i++) {
           pass.setBindGroup(1, this.objectBindGroup, [(spriteBase + normalSpriteCount + i) * this.objectStride])
-          pass.drawIndexed(geo._indexCount)
+          pass.drawIndexedIndirect(this.indirectBuffer, (spriteBase + normalSpriteCount + i) * INDIRECT_STRIDE)
           this.info.drawCalls++
           this.info.triangles += 2
         }
@@ -2278,7 +2512,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         pass.setPipeline(pipeline)
         pass.setBindGroup(1, this.objectBindGroup, [(iSpriteBase + i) * this.objectStride])
         pass.setBindGroup(2, is._instanceBindGroup!)
-        pass.drawIndexed(geo._indexCount, is.count)
+        pass.drawIndexedIndirect(this.indirectBuffer, (iSpriteBase + i) * INDIRECT_STRIDE)
         this.info.drawCalls++
         this.info.triangles += 2 * is.count
       }
@@ -2291,6 +2525,9 @@ struct ObjectData { model: mat4x4f, color: vec4f }
   dispose() {
     this.sceneBuffer?.destroy()
     this.objectBuffer?.destroy()
+    this.frustumBuffer?.destroy()
+    this.sphereBuffer?.destroy()
+    this.indirectBuffer?.destroy()
     this.depthTexture?.destroy()
     this.shadowMapTexture?.destroy()
     this.shadowLightBuffer?.destroy()
