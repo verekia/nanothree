@@ -375,7 +375,8 @@ export class AnimationMixer {
               _blendedQuat[3] = cur[3] * wa + _tempQuat[3] * sign * wb
             }
             // Normalize
-            const len = Math.sqrt(_blendedQuat[0] ** 2 + _blendedQuat[1] ** 2 + _blendedQuat[2] ** 2 + _blendedQuat[3] ** 2) || 1
+            const len =
+              Math.sqrt(_blendedQuat[0] ** 2 + _blendedQuat[1] ** 2 + _blendedQuat[2] ** 2 + _blendedQuat[3] ** 2) || 1
             node._quaternion[0] = _blendedQuat[0] / len
             node._quaternion[1] = _blendedQuat[1] / len
             node._quaternion[2] = _blendedQuat[2] / len

@@ -1454,14 +1454,22 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     // Single-pass traversal: compute world matrices + collect renderables + frustum cull
     scene.updateMatrixWorld(camera.viewProjection)
 
-    const solidMeshes = this._solidMeshes; solidMeshes.length = 0
-    const texturedMeshes = this._texturedMeshes; texturedMeshes.length = 0
-    const vertexColorMeshes = this._vertexColorMeshes; vertexColorMeshes.length = 0
-    const vertexColorBasicMeshes = this._vertexColorBasicMeshes; vertexColorBasicMeshes.length = 0
-    const basicMeshes = this._basicMeshes; basicMeshes.length = 0
-    const wireframeMeshes = this._wireframeMeshes; wireframeMeshes.length = 0
-    const customMeshes = this._customMeshes; customMeshes.length = 0
-    const lines = this._lines; lines.length = 0
+    const solidMeshes = this._solidMeshes
+    solidMeshes.length = 0
+    const texturedMeshes = this._texturedMeshes
+    texturedMeshes.length = 0
+    const vertexColorMeshes = this._vertexColorMeshes
+    vertexColorMeshes.length = 0
+    const vertexColorBasicMeshes = this._vertexColorBasicMeshes
+    vertexColorBasicMeshes.length = 0
+    const basicMeshes = this._basicMeshes
+    basicMeshes.length = 0
+    const wireframeMeshes = this._wireframeMeshes
+    wireframeMeshes.length = 0
+    const customMeshes = this._customMeshes
+    customMeshes.length = 0
+    const lines = this._lines
+    lines.length = 0
 
     for (let i = 0; i < scene.meshes.length; i++) {
       const m = scene.meshes[i]
@@ -1479,8 +1487,10 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     for (let i = 0; i < scene.lines.length; i++) lines.push(scene.lines[i])
 
     // Classify skinned meshes (solid vs textured)
-    const skinnedSolid = this._skinnedSolid; skinnedSolid.length = 0
-    const skinnedTextured = this._skinnedTextured; skinnedTextured.length = 0
+    const skinnedSolid = this._skinnedSolid
+    skinnedSolid.length = 0
+    const skinnedTextured = this._skinnedTextured
+    skinnedTextured.length = 0
     for (let i = 0; i < scene.skinnedMeshes.length; i++) {
       const sm = scene.skinnedMeshes[i]
       if ((sm.material as MeshLambertMaterial).hasTexture) skinnedTextured.push(sm)
@@ -1488,8 +1498,10 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     }
 
     // Split transparent sprites by blending mode (opaque sprites are ignored for now)
-    const normalSprites = this._normalSprites; normalSprites.length = 0
-    const additiveSprites = this._additiveSprites; additiveSprites.length = 0
+    const normalSprites = this._normalSprites
+    normalSprites.length = 0
+    const additiveSprites = this._additiveSprites
+    additiveSprites.length = 0
     for (let i = 0; i < scene.sprites.length; i++) {
       const s = scene.sprites[i]
       if (!s.material.transparent) continue
