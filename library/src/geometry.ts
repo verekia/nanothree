@@ -1,0 +1,855 @@
+// Geometry classes for nanothree - Three.js-compatible API
+
+export class Float32BufferAttribute {
+  readonly array: Float32Array
+  readonly itemSize: number
+
+  constructor(array: ArrayLike<number>, itemSize: number) {
+    this.array = array instanceof Float32Array ? array : new Float32Array(array)
+    this.itemSize = itemSize
+  }
+}
+
+export class Uint16BufferAttribute {
+  readonly array: Uint16Array
+  readonly itemSize: number
+
+  constructor(array: ArrayLike<number>, itemSize: number) {
+    this.array = array instanceof Uint16Array ? array : new Uint16Array(array)
+    this.itemSize = itemSize
+  }
+}
+
+export interface BoundingSphere {
+  cx: number
+  cy: number
+  cz: number
+  radius: number
+}
+
+export class BufferGeometry {
+  positions: Float32Array | null = null
+  normals: Float32Array | null = null
+  uvs: Float32Array | null = null
+  colors: Float32Array | null = null
+  skinIndices: Float32Array | null = null
+  skinWeights: Float32Array | null = null
+  indices: Uint16Array | Uint32Array | null = null
+
+  /** Bounding sphere in local (geometry) space. Computed lazily on first access. */
+  boundingSphere: BoundingSphere | null = null
+
+  // GPU resources (lazily created by renderer)
+  _vertexBuffer: GPUBuffer | null = null
+  _indexBuffer: GPUBuffer | null = null
+  _indexCount = 0
+  _indexFormat: GPUIndexFormat = 'uint16'
+  _vertexCount = 0
+  _gpuDirty = true
+  _device: GPUDevice | null = null
+  /** Whether the GPU vertex buffer includes per-vertex color data. */
+  _hasVertexColors = false
+  /** Whether the GPU vertex buffer includes skinning data (joints + weights). */
+  _hasSkinning = false
+
+  // Wireframe index buffer (lazily generated from triangle indices)
+  _wireframeIndexBuffer: GPUBuffer | null = null
+  _wireframeIndexCount = 0
+  _wireframeIndexFormat: GPUIndexFormat = 'uint16'
+  _wireframeDirty = true
+
+  setAttribute(name: string, attribute: Float32BufferAttribute | Uint16BufferAttribute) {
+    if (name === 'position') {
+      this.positions = attribute.array instanceof Float32Array ? attribute.array : new Float32Array(attribute.array)
+      this.boundingSphere = null
+    } else if (name === 'normal') {
+      this.normals = attribute.array instanceof Float32Array ? attribute.array : new Float32Array(attribute.array)
+    } else if (name === 'uv') {
+      this.uvs = attribute.array instanceof Float32Array ? attribute.array : new Float32Array(attribute.array)
+    } else if (name === 'color') {
+      this.colors = attribute.array instanceof Float32Array ? attribute.array : new Float32Array(attribute.array)
+    } else if (name === 'skinIndex') {
+      // Accept Uint16BufferAttribute or Float32BufferAttribute; store as Float32Array
+      if (attribute.array instanceof Float32Array) {
+        this.skinIndices = attribute.array
+      } else {
+        const f = new Float32Array(attribute.array.length)
+        for (let i = 0; i < attribute.array.length; i++) f[i] = attribute.array[i]
+        this.skinIndices = f
+      }
+    } else if (name === 'skinWeight') {
+      this.skinWeights = attribute.array instanceof Float32Array ? attribute.array : new Float32Array(attribute.array)
+    }
+    this._gpuDirty = true
+    this._wireframeDirty = true
+    return this
+  }
+
+  setIndex(indices: ArrayLike<number>) {
+    if (indices instanceof Uint16Array) {
+      this.indices = indices
+    } else if (indices instanceof Uint32Array) {
+      this.indices = indices
+    } else {
+      this.indices = new Uint16Array(indices)
+    }
+    this._gpuDirty = true
+    this._wireframeDirty = true
+    return this
+  }
+
+  computeBoundingSphere(): void {
+    const pos = this.positions
+    if (!pos || pos.length === 0) {
+      this.boundingSphere = { cx: 0, cy: 0, cz: 0, radius: 0 }
+      return
+    }
+    const count = pos.length / 3
+    // Compute centroid
+    let cx = 0,
+      cy = 0,
+      cz = 0
+    for (let i = 0; i < count; i++) {
+      cx += pos[i * 3]
+      cy += pos[i * 3 + 1]
+      cz += pos[i * 3 + 2]
+    }
+    cx /= count
+    cy /= count
+    cz /= count
+    // Compute max distance from centroid
+    let maxDistSq = 0
+    for (let i = 0; i < count; i++) {
+      const dx = pos[i * 3] - cx
+      const dy = pos[i * 3 + 1] - cy
+      const dz = pos[i * 3 + 2] - cz
+      const distSq = dx * dx + dy * dy + dz * dz
+      if (distSq > maxDistSq) maxDistSq = distSq
+    }
+    this.boundingSphere = { cx, cy, cz, radius: Math.sqrt(maxDistSq) }
+  }
+
+  _ensureGPU(device: GPUDevice) {
+    if (!this._gpuDirty && this._device === device) return
+    this._device = device
+
+    const positions = this.positions!
+    const normals = this.normals
+    const uvs = this.uvs
+    const colors = this.colors
+    const skinIdx = this.skinIndices
+    const skinWt = this.skinWeights
+    const vertexCount = positions.length / 3
+    this._vertexCount = vertexCount
+    this._hasVertexColors = colors !== null && colors.length >= vertexCount * 3
+    this._hasSkinning = skinIdx !== null && skinWt !== null
+
+    // Interleave: pos(3)+norm(3)+uv(2) = 8, +color(3) = 11, +joints(4)+weights(4) = 16
+    const stride = this._hasSkinning ? 16 : this._hasVertexColors ? 11 : 8
+    const interleaved = new Float32Array(vertexCount * stride)
+    for (let i = 0; i < vertexCount; i++) {
+      const i3 = i * 3
+      const i2 = i * 2
+      const i4 = i * 4
+      const base = i * stride
+      interleaved[base] = positions[i3]
+      interleaved[base + 1] = positions[i3 + 1]
+      interleaved[base + 2] = positions[i3 + 2]
+      if (normals) {
+        interleaved[base + 3] = normals[i3]
+        interleaved[base + 4] = normals[i3 + 1]
+        interleaved[base + 5] = normals[i3 + 2]
+      }
+      if (uvs) {
+        interleaved[base + 6] = uvs[i2]
+        interleaved[base + 7] = uvs[i2 + 1]
+      }
+      if (this._hasSkinning) {
+        interleaved[base + 8] = skinIdx![i4]
+        interleaved[base + 9] = skinIdx![i4 + 1]
+        interleaved[base + 10] = skinIdx![i4 + 2]
+        interleaved[base + 11] = skinIdx![i4 + 3]
+        interleaved[base + 12] = skinWt![i4]
+        interleaved[base + 13] = skinWt![i4 + 1]
+        interleaved[base + 14] = skinWt![i4 + 2]
+        interleaved[base + 15] = skinWt![i4 + 3]
+      } else if (this._hasVertexColors) {
+        interleaved[base + 8] = colors![i3]
+        interleaved[base + 9] = colors![i3 + 1]
+        interleaved[base + 10] = colors![i3 + 2]
+      }
+    }
+
+    if (this._vertexBuffer) this._vertexBuffer.destroy()
+    this._vertexBuffer = device.createBuffer({
+      size: interleaved.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    })
+    device.queue.writeBuffer(this._vertexBuffer, 0, interleaved as unknown as ArrayBuffer)
+
+    if (this.indices) {
+      const idx = this.indices
+      this._indexCount = idx.length
+      this._indexFormat = idx instanceof Uint32Array ? 'uint32' : 'uint16'
+      if (this._indexBuffer) this._indexBuffer.destroy()
+      this._indexBuffer = device.createBuffer({
+        size: idx.byteLength,
+        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+      })
+      device.queue.writeBuffer(this._indexBuffer, 0, idx as unknown as ArrayBuffer)
+    } else {
+      this._indexCount = 0
+      if (this._indexBuffer) {
+        this._indexBuffer.destroy()
+        this._indexBuffer = null
+      }
+    }
+
+    this._gpuDirty = false
+  }
+
+  _ensureWireframeGPU(device: GPUDevice) {
+    this._ensureGPU(device)
+    if (!this._wireframeDirty && this._device === device) return
+    if (!this.indices) return
+
+    const triIndices = this.indices
+    const triCount = triIndices.length / 3
+    const use32 = triIndices instanceof Uint32Array
+    this._wireframeIndexFormat = use32 ? 'uint32' : 'uint16'
+    const wireIndices = use32 ? new Uint32Array(triCount * 6) : new Uint16Array(triCount * 6)
+
+    for (let i = 0; i < triCount; i++) {
+      const i3 = i * 3
+      const a = triIndices[i3],
+        b = triIndices[i3 + 1],
+        c = triIndices[i3 + 2]
+      const i6 = i * 6
+      wireIndices[i6] = a
+      wireIndices[i6 + 1] = b
+      wireIndices[i6 + 2] = b
+      wireIndices[i6 + 3] = c
+      wireIndices[i6 + 4] = c
+      wireIndices[i6 + 5] = a
+    }
+
+    this._wireframeIndexCount = wireIndices.length
+    if (this._wireframeIndexBuffer) this._wireframeIndexBuffer.destroy()
+    this._wireframeIndexBuffer = device.createBuffer({
+      size: wireIndices.byteLength,
+      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+    })
+    device.queue.writeBuffer(this._wireframeIndexBuffer, 0, wireIndices as unknown as ArrayBuffer)
+    this._wireframeDirty = false
+  }
+
+  dispose() {
+    this._vertexBuffer?.destroy()
+    this._indexBuffer?.destroy()
+    this._wireframeIndexBuffer?.destroy()
+    this._vertexBuffer = null
+    this._indexBuffer = null
+    this._wireframeIndexBuffer = null
+    this._device = null
+    this._gpuDirty = true
+    this._wireframeDirty = true
+  }
+}
+
+// ── BoxGeometry ─────────────────────────────────────────────────────────
+// Ported from Three.js BoxGeometry — identical vertex output.
+
+export class BoxGeometry extends BufferGeometry {
+  constructor(width = 1, height = 1, depth = 1, widthSegments = 1, heightSegments = 1, depthSegments = 1) {
+    super()
+
+    widthSegments = Math.floor(widthSegments)
+    heightSegments = Math.floor(heightSegments)
+    depthSegments = Math.floor(depthSegments)
+
+    const indices: number[] = []
+    const vertices: number[] = []
+    const normals: number[] = []
+    const uvArray: number[] = []
+
+    let numberOfVertices = 0
+
+    const buildPlane = (
+      u: number,
+      v: number,
+      w: number,
+      udir: number,
+      vdir: number,
+      planeWidth: number,
+      planeHeight: number,
+      planeDepth: number,
+      gridX: number,
+      gridY: number,
+    ) => {
+      const segmentWidth = planeWidth / gridX
+      const segmentHeight = planeHeight / gridY
+      const widthHalf = planeWidth / 2
+      const heightHalf = planeHeight / 2
+      const depthHalf = planeDepth / 2
+      const gridX1 = gridX + 1
+      const gridY1 = gridY + 1
+      let vertexCounter = 0
+
+      for (let iy = 0; iy < gridY1; iy++) {
+        const y = iy * segmentHeight - heightHalf
+        for (let ix = 0; ix < gridX1; ix++) {
+          const x = ix * segmentWidth - widthHalf
+          const vec = [0, 0, 0]
+          vec[u] = x * udir
+          vec[v] = y * vdir
+          vec[w] = depthHalf
+          vertices.push(vec[0], vec[1], vec[2])
+
+          vec[u] = 0
+          vec[v] = 0
+          vec[w] = planeDepth > 0 ? 1 : -1
+          normals.push(vec[0], vec[1], vec[2])
+
+          uvArray.push(ix / gridX, 1 - iy / gridY)
+
+          vertexCounter++
+        }
+      }
+
+      for (let iy = 0; iy < gridY; iy++) {
+        for (let ix = 0; ix < gridX; ix++) {
+          const a = numberOfVertices + ix + gridX1 * iy
+          const b = numberOfVertices + ix + gridX1 * (iy + 1)
+          const c = numberOfVertices + (ix + 1) + gridX1 * (iy + 1)
+          const d = numberOfVertices + (ix + 1) + gridX1 * iy
+          indices.push(a, b, d)
+          indices.push(b, c, d)
+        }
+      }
+
+      numberOfVertices += vertexCounter
+    }
+
+    buildPlane(2, 1, 0, -1, -1, depth, height, width, depthSegments, heightSegments) // px
+    buildPlane(2, 1, 0, 1, -1, depth, height, -width, depthSegments, heightSegments) // nx
+    buildPlane(0, 2, 1, 1, 1, width, depth, height, widthSegments, depthSegments) // py
+    buildPlane(0, 2, 1, 1, -1, width, depth, -height, widthSegments, depthSegments) // ny
+    buildPlane(0, 1, 2, 1, -1, width, height, depth, widthSegments, heightSegments) // pz
+    buildPlane(0, 1, 2, -1, -1, width, height, -depth, widthSegments, heightSegments) // nz
+
+    this.positions = new Float32Array(vertices)
+    this.normals = new Float32Array(normals)
+    this.uvs = new Float32Array(uvArray)
+    this.indices = new Uint16Array(indices)
+  }
+}
+
+// ── SphereGeometry ──────────────────────────────────────────────────────
+// Ported from Three.js SphereGeometry — identical vertex output.
+
+export class SphereGeometry extends BufferGeometry {
+  constructor(
+    radius = 1,
+    widthSegments = 32,
+    heightSegments = 16,
+    phiStart = 0,
+    phiLength = Math.PI * 2,
+    thetaStart = 0,
+    thetaLength = Math.PI,
+  ) {
+    super()
+
+    widthSegments = Math.max(3, Math.floor(widthSegments))
+    heightSegments = Math.max(2, Math.floor(heightSegments))
+
+    const thetaEnd = Math.min(thetaStart + thetaLength, Math.PI)
+
+    let index = 0
+    const grid: number[][] = []
+
+    const indices: number[] = []
+    const vertices: number[] = []
+    const normals: number[] = []
+    const uvArray: number[] = []
+
+    for (let iy = 0; iy <= heightSegments; iy++) {
+      const verticesRow: number[] = []
+      const v = iy / heightSegments
+
+      for (let ix = 0; ix <= widthSegments; ix++) {
+        const u = ix / widthSegments
+
+        const vx = -radius * Math.cos(phiStart + u * phiLength) * Math.sin(thetaStart + v * thetaLength)
+        const vy = radius * Math.cos(thetaStart + v * thetaLength)
+        const vz = radius * Math.sin(phiStart + u * phiLength) * Math.sin(thetaStart + v * thetaLength)
+
+        vertices.push(vx, vy, vz)
+
+        const len = Math.sqrt(vx * vx + vy * vy + vz * vz) || 1
+        normals.push(vx / len, vy / len, vz / len)
+
+        uvArray.push(u, 1 - v)
+
+        verticesRow.push(index++)
+      }
+
+      grid.push(verticesRow)
+    }
+
+    for (let iy = 0; iy < heightSegments; iy++) {
+      for (let ix = 0; ix < widthSegments; ix++) {
+        const a = grid[iy][ix + 1]
+        const b = grid[iy][ix]
+        const c = grid[iy + 1][ix]
+        const d = grid[iy + 1][ix + 1]
+
+        if (iy !== 0 || thetaStart > 0) indices.push(a, b, d)
+        if (iy !== heightSegments - 1 || thetaEnd < Math.PI) indices.push(b, c, d)
+      }
+    }
+
+    this.positions = new Float32Array(vertices)
+    this.normals = new Float32Array(normals)
+    this.uvs = new Float32Array(uvArray)
+    this.indices = new Uint16Array(indices)
+  }
+}
+
+// ── CapsuleGeometry ─────────────────────────────────────────────────────
+// Ported from Three.js CapsuleGeometry — identical vertex output.
+
+export class CapsuleGeometry extends BufferGeometry {
+  constructor(radius = 1, height = 1, capSegments = 4, radialSegments = 8, heightSegments = 1) {
+    super()
+
+    height = Math.max(0, height)
+    capSegments = Math.max(1, Math.floor(capSegments))
+    radialSegments = Math.max(3, Math.floor(radialSegments))
+    heightSegments = Math.max(1, Math.floor(heightSegments))
+
+    const indices: number[] = []
+    const vertices: number[] = []
+    const normals: number[] = []
+    const uvArray: number[] = []
+
+    const halfHeight = height / 2
+    const numVerticalSegments = capSegments * 2 + heightSegments
+    const verticesPerRow = radialSegments + 1
+
+    for (let iy = 0; iy <= numVerticalSegments; iy++) {
+      let profileY = 0
+      let profileRadius = 0
+      let normalYComponent = 0
+
+      if (iy <= capSegments) {
+        const segmentProgress = iy / capSegments
+        const angle = (segmentProgress * Math.PI) / 2
+        profileY = -halfHeight - radius * Math.cos(angle)
+        profileRadius = radius * Math.sin(angle)
+        normalYComponent = -radius * Math.cos(angle)
+      } else if (iy <= capSegments + heightSegments) {
+        const segmentProgress = (iy - capSegments) / heightSegments
+        profileY = -halfHeight + segmentProgress * height
+        profileRadius = radius
+        normalYComponent = 0
+      } else {
+        const segmentProgress = (iy - capSegments - heightSegments) / capSegments
+        const angle = (segmentProgress * Math.PI) / 2
+        profileY = halfHeight + radius * Math.sin(angle)
+        profileRadius = radius * Math.cos(angle)
+        normalYComponent = radius * Math.sin(angle)
+      }
+
+      for (let ix = 0; ix <= radialSegments; ix++) {
+        const u = ix / radialSegments
+        const theta = u * Math.PI * 2
+        const sinTheta = Math.sin(theta)
+        const cosTheta = Math.cos(theta)
+
+        vertices.push(-profileRadius * cosTheta, profileY, profileRadius * sinTheta)
+
+        let nx = -profileRadius * cosTheta
+        let ny = normalYComponent
+        let nz = profileRadius * sinTheta
+        const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
+        nx /= len
+        ny /= len
+        nz /= len
+        normals.push(nx, ny, nz)
+
+        uvArray.push(u, 1 - iy / numVerticalSegments)
+      }
+
+      if (iy > 0) {
+        const prevIndexRow = (iy - 1) * verticesPerRow
+        for (let ix = 0; ix < radialSegments; ix++) {
+          const i1 = prevIndexRow + ix
+          const i2 = prevIndexRow + ix + 1
+          const i3 = iy * verticesPerRow + ix
+          const i4 = iy * verticesPerRow + ix + 1
+          indices.push(i1, i2, i3)
+          indices.push(i2, i4, i3)
+        }
+      }
+    }
+
+    this.positions = new Float32Array(vertices)
+    this.normals = new Float32Array(normals)
+    this.uvs = new Float32Array(uvArray)
+    this.indices = new Uint16Array(indices)
+  }
+}
+
+// ── CylinderGeometry ────────────────────────────────────────────────────
+// Ported from Three.js CylinderGeometry — identical vertex output.
+
+export class CylinderGeometry extends BufferGeometry {
+  constructor(
+    radiusTop = 1,
+    radiusBottom = 1,
+    height = 1,
+    radialSegments = 32,
+    heightSegments = 1,
+    openEnded = false,
+    thetaStart = 0,
+    thetaLength = Math.PI * 2,
+  ) {
+    super()
+
+    radialSegments = Math.floor(radialSegments)
+    heightSegments = Math.floor(heightSegments)
+
+    const indices: number[] = []
+    const vertices: number[] = []
+    const normals: number[] = []
+    const uvArray: number[] = []
+
+    let index = 0
+    const indexArray: number[][] = []
+    const halfHeight = height / 2
+
+    // ── Torso ──
+    const slope = (radiusBottom - radiusTop) / height
+
+    for (let y = 0; y <= heightSegments; y++) {
+      const indexRow: number[] = []
+      const v = y / heightSegments
+      const radius = v * (radiusBottom - radiusTop) + radiusTop
+
+      for (let x = 0; x <= radialSegments; x++) {
+        const u = x / radialSegments
+        const theta = u * thetaLength + thetaStart
+        const sinTheta = Math.sin(theta)
+        const cosTheta = Math.cos(theta)
+
+        vertices.push(radius * sinTheta, -v * height + halfHeight, radius * cosTheta)
+
+        let nx = sinTheta,
+          ny = slope,
+          nz = cosTheta
+        const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
+        nx /= len
+        ny /= len
+        nz /= len
+        normals.push(nx, ny, nz)
+
+        uvArray.push(u, 1 - v)
+
+        indexRow.push(index++)
+      }
+
+      indexArray.push(indexRow)
+    }
+
+    for (let x = 0; x < radialSegments; x++) {
+      for (let y = 0; y < heightSegments; y++) {
+        const a = indexArray[y][x]
+        const b = indexArray[y + 1][x]
+        const c = indexArray[y + 1][x + 1]
+        const d = indexArray[y][x + 1]
+
+        if (radiusTop > 0 || y !== 0) indices.push(a, b, d)
+        if (radiusBottom > 0 || y !== heightSegments - 1) indices.push(b, c, d)
+      }
+    }
+
+    // ── Caps ──
+    if (!openEnded) {
+      const generateCap = (top: boolean) => {
+        const radius = top ? radiusTop : radiusBottom
+        const sign = top ? 1 : -1
+
+        const centerIndexStart = index
+        for (let x = 1; x <= radialSegments; x++) {
+          vertices.push(0, halfHeight * sign, 0)
+          normals.push(0, sign, 0)
+          uvArray.push(0.5, 0.5)
+          index++
+        }
+        const centerIndexEnd = index
+
+        for (let x = 0; x <= radialSegments; x++) {
+          const u = x / radialSegments
+          const theta = u * thetaLength + thetaStart
+          const cosTheta = Math.cos(theta)
+          const sinTheta = Math.sin(theta)
+          vertices.push(radius * sinTheta, halfHeight * sign, radius * cosTheta)
+          normals.push(0, sign, 0)
+          uvArray.push(sinTheta * 0.5 + 0.5, cosTheta * 0.5 * sign + 0.5)
+          index++
+        }
+
+        for (let x = 0; x < radialSegments; x++) {
+          const c = centerIndexStart + x
+          const i = centerIndexEnd + x
+          if (top) {
+            indices.push(i, i + 1, c)
+          } else {
+            indices.push(i + 1, i, c)
+          }
+        }
+      }
+
+      if (radiusTop > 0) generateCap(true)
+      if (radiusBottom > 0) generateCap(false)
+    }
+
+    this.positions = new Float32Array(vertices)
+    this.normals = new Float32Array(normals)
+    this.uvs = new Float32Array(uvArray)
+    this.indices = new Uint16Array(indices)
+  }
+}
+
+// ── CircleGeometry ──────────────────────────────────────────────────────
+// Ported from Three.js CircleGeometry — identical vertex output.
+
+export class CircleGeometry extends BufferGeometry {
+  constructor(radius = 1, segments = 32, thetaStart = 0, thetaLength = Math.PI * 2) {
+    super()
+
+    segments = Math.max(3, segments)
+
+    const indices: number[] = []
+    const vertices: number[] = []
+    const normals: number[] = []
+    const uvArray: number[] = []
+
+    // Center point
+    vertices.push(0, 0, 0)
+    normals.push(0, 0, 1)
+    uvArray.push(0.5, 0.5)
+
+    for (let s = 0; s <= segments; s++) {
+      const segment = thetaStart + (s / segments) * thetaLength
+
+      const cx = Math.cos(segment)
+      const cy = Math.sin(segment)
+      vertices.push(radius * cx, radius * cy, 0)
+      normals.push(0, 0, 1)
+      uvArray.push(cx * 0.5 + 0.5, cy * 0.5 + 0.5)
+    }
+
+    for (let i = 1; i <= segments; i++) {
+      indices.push(i, i + 1, 0)
+    }
+
+    this.positions = new Float32Array(vertices)
+    this.normals = new Float32Array(normals)
+    this.uvs = new Float32Array(uvArray)
+    this.indices = new Uint16Array(indices)
+  }
+}
+
+// ── ConeGeometry ────────────────────────────────────────────────────────
+// Ported from Three.js ConeGeometry — CylinderGeometry with radiusTop=0.
+
+export class ConeGeometry extends CylinderGeometry {
+  constructor(
+    radius = 1,
+    height = 1,
+    radialSegments = 32,
+    heightSegments = 1,
+    openEnded = false,
+    thetaStart = 0,
+    thetaLength = Math.PI * 2,
+  ) {
+    super(0, radius, height, radialSegments, heightSegments, openEnded, thetaStart, thetaLength)
+  }
+}
+
+// ── PlaneGeometry ───────────────────────────────────────────────────────
+// Ported from Three.js PlaneGeometry — identical vertex output.
+
+export class PlaneGeometry extends BufferGeometry {
+  constructor(width = 1, height = 1, widthSegments = 1, heightSegments = 1) {
+    super()
+
+    const widthHalf = width / 2
+    const heightHalf = height / 2
+
+    const gridX = Math.floor(widthSegments)
+    const gridY = Math.floor(heightSegments)
+
+    const gridX1 = gridX + 1
+    const gridY1 = gridY + 1
+
+    const segmentWidth = width / gridX
+    const segmentHeight = height / gridY
+
+    const indices: number[] = []
+    const vertices: number[] = []
+    const normals: number[] = []
+    const uvArray: number[] = []
+
+    for (let iy = 0; iy < gridY1; iy++) {
+      const y = iy * segmentHeight - heightHalf
+      for (let ix = 0; ix < gridX1; ix++) {
+        const x = ix * segmentWidth - widthHalf
+        vertices.push(x, -y, 0)
+        normals.push(0, 0, 1)
+        uvArray.push(ix / gridX, 1 - iy / gridY)
+      }
+    }
+
+    for (let iy = 0; iy < gridY; iy++) {
+      for (let ix = 0; ix < gridX; ix++) {
+        const a = ix + gridX1 * iy
+        const b = ix + gridX1 * (iy + 1)
+        const c = ix + 1 + gridX1 * (iy + 1)
+        const d = ix + 1 + gridX1 * iy
+        indices.push(a, b, d)
+        indices.push(b, c, d)
+      }
+    }
+
+    this.positions = new Float32Array(vertices)
+    this.normals = new Float32Array(normals)
+    this.uvs = new Float32Array(uvArray)
+    this.indices = new Uint16Array(indices)
+  }
+}
+
+// ── TorusGeometry ───────────────────────────────────────────────────────
+// Ported from Three.js TorusGeometry — identical vertex output.
+
+export class TorusGeometry extends BufferGeometry {
+  constructor(radius = 1, tube = 0.4, radialSegments = 12, tubularSegments = 48, arc = Math.PI * 2) {
+    super()
+
+    radialSegments = Math.floor(radialSegments)
+    tubularSegments = Math.floor(tubularSegments)
+
+    const indices: number[] = []
+    const vertices: number[] = []
+    const normals: number[] = []
+    const uvArray: number[] = []
+
+    for (let j = 0; j <= radialSegments; j++) {
+      for (let i = 0; i <= tubularSegments; i++) {
+        const u = (i / tubularSegments) * arc
+        const v = (j / radialSegments) * Math.PI * 2
+
+        const cx = (radius + tube * Math.cos(v)) * Math.cos(u)
+        const cy = (radius + tube * Math.cos(v)) * Math.sin(u)
+        const cz = tube * Math.sin(v)
+        vertices.push(cx, cy, cz)
+
+        const nx = cx - radius * Math.cos(u)
+        const ny = cy - radius * Math.sin(u)
+        const nz = cz
+        const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
+        normals.push(nx / len, ny / len, nz / len)
+
+        uvArray.push(i / tubularSegments, j / radialSegments)
+      }
+    }
+
+    for (let j = 1; j <= radialSegments; j++) {
+      for (let i = 1; i <= tubularSegments; i++) {
+        const a = (tubularSegments + 1) * j + i - 1
+        const b = (tubularSegments + 1) * (j - 1) + i - 1
+        const c = (tubularSegments + 1) * (j - 1) + i
+        const d = (tubularSegments + 1) * j + i
+        indices.push(a, b, d)
+        indices.push(b, c, d)
+      }
+    }
+
+    this.positions = new Float32Array(vertices)
+    this.normals = new Float32Array(normals)
+    this.uvs = new Float32Array(uvArray)
+    this.indices = new Uint16Array(indices)
+  }
+}
+
+// ── TetrahedronGeometry ─────────────────────────────────────────────────
+// Ported from Three.js PolyhedronGeometry (detail=0) — identical vertex output.
+// Three.js TetrahedronGeometry extends PolyhedronGeometry which projects
+// vertices onto a sphere and uses flat (face) normals at detail=0.
+
+export class TetrahedronGeometry extends BufferGeometry {
+  constructor(radius = 1) {
+    super()
+
+    // Three.js tetrahedron base vertices and face indices
+    const baseVertices = [1, 1, 1, -1, -1, 1, -1, 1, -1, 1, -1, -1]
+    const faceIndices = [2, 1, 0, 0, 3, 2, 1, 3, 0, 2, 3, 1]
+
+    // Build non-indexed geometry: 4 faces × 3 vertices = 12 vertices
+    const positions: number[] = []
+    const normals: number[] = []
+    const uvArray: number[] = []
+
+    for (let i = 0; i < faceIndices.length; i += 3) {
+      const verts: number[][] = []
+      for (let j = 0; j < 3; j++) {
+        const idx = faceIndices[i + j] * 3
+        let vx = baseVertices[idx]
+        let vy = baseVertices[idx + 1]
+        let vz = baseVertices[idx + 2]
+        const len = Math.sqrt(vx * vx + vy * vy + vz * vz) || 1
+        vx = (vx / len) * radius
+        vy = (vy / len) * radius
+        vz = (vz / len) * radius
+        verts.push([vx, vy, vz])
+        positions.push(vx, vy, vz)
+      }
+
+      // Per-face triangle UVs
+      uvArray.push(0, 0, 1, 0, 0.5, 1)
+
+      const ax = verts[0][0],
+        ay = verts[0][1],
+        az = verts[0][2]
+      const bx = verts[1][0],
+        by = verts[1][1],
+        bz = verts[1][2]
+      const cx = verts[2][0],
+        cy = verts[2][1],
+        cz = verts[2][2]
+      const e1x = bx - ax,
+        e1y = by - ay,
+        e1z = bz - az
+      const e2x = cx - ax,
+        e2y = cy - ay,
+        e2z = cz - az
+      let nx = e1y * e2z - e1z * e2y
+      let ny = e1z * e2x - e1x * e2z
+      let nz = e1x * e2y - e1y * e2x
+      const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
+      nx /= nLen
+      ny /= nLen
+      nz /= nLen
+      normals.push(nx, ny, nz, nx, ny, nz, nx, ny, nz)
+    }
+
+    const indices = new Uint16Array(positions.length / 3)
+    for (let i = 0; i < indices.length; i++) indices[i] = i
+
+    this.positions = new Float32Array(positions)
+    this.normals = new Float32Array(normals)
+    this.uvs = new Float32Array(uvArray)
+    this.indices = indices
+  }
+}
