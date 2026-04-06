@@ -95,45 +95,59 @@ function rayPlaneIntersection(
 
 // ── Euler ↔ rotation helpers (nanothree uses Euler, not quaternion) ────
 
-function eulerToQuat(ex: number, ey: number, ez: number): [number, number, number, number] {
+// Pre-allocated temp arrays for quaternion/euler math (avoids per-event allocations)
+const _gizmoQuat1: [number, number, number, number] = [0, 0, 0, 1]
+const _gizmoQuat2: [number, number, number, number] = [0, 0, 0, 1]
+const _gizmoQuat3: [number, number, number, number] = [0, 0, 0, 1]
+const _gizmoEuler: [number, number, number] = [0, 0, 0]
+const _gizmoAxisDir: number[] = [0, 0, 0]
+const _gizmoNDC: [number, number] = [0, 0]
+const _gizmoHitPoint: number[] = [0, 0, 0]
+const _gizmoTempVec3: number[] = [0, 0, 0]
+
+function eulerToQuat(out: [number, number, number, number], ex: number, ey: number, ez: number): void {
   const c1 = Math.cos(ex / 2),
     s1 = Math.sin(ex / 2)
   const c2 = Math.cos(ey / 2),
     s2 = Math.sin(ey / 2)
   const c3 = Math.cos(ez / 2),
     s3 = Math.sin(ez / 2)
-  return [
-    s1 * c2 * c3 + c1 * s2 * s3,
-    c1 * s2 * c3 - s1 * c2 * s3,
-    c1 * c2 * s3 + s1 * s2 * c3,
-    c1 * c2 * c3 - s1 * s2 * s3,
-  ]
+  out[0] = s1 * c2 * c3 + c1 * s2 * s3
+  out[1] = c1 * s2 * c3 - s1 * c2 * s3
+  out[2] = c1 * c2 * s3 + s1 * s2 * c3
+  out[3] = c1 * c2 * c3 - s1 * s2 * s3
 }
 
-function quatToEuler(qx: number, qy: number, qz: number, qw: number): [number, number, number] {
+function quatToEuler(out: [number, number, number], qx: number, qy: number, qz: number, qw: number): void {
   const sinr = 2 * (qw * qx + qy * qz)
   const cosr = 1 - 2 * (qx * qx + qy * qy)
-  const rx = Math.atan2(sinr, cosr)
+  out[0] = Math.atan2(sinr, cosr)
   const sinp = 2 * (qw * qy - qz * qx)
-  const ry = Math.abs(sinp) >= 1 ? (Math.sign(sinp) * Math.PI) / 2 : Math.asin(sinp)
+  out[1] = Math.abs(sinp) >= 1 ? (Math.sign(sinp) * Math.PI) / 2 : Math.asin(sinp)
   const siny = 2 * (qw * qz + qx * qy)
   const cosy = 1 - 2 * (qy * qy + qz * qz)
-  const rz = Math.atan2(siny, cosy)
-  return [rx, ry, rz]
+  out[2] = Math.atan2(siny, cosy)
 }
 
-function quatMul(a: number[], b: number[]): [number, number, number, number] {
-  return [
-    a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-    a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-    a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-    a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-  ]
+function quatMul(out: [number, number, number, number], a: number[], b: number[]): void {
+  out[0] = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1]
+  out[1] = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0]
+  out[2] = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3]
+  out[3] = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]
 }
 
-function quatFromAxisAngle(ax: number, ay: number, az: number, angle: number): [number, number, number, number] {
+function quatFromAxisAngle(
+  out: [number, number, number, number],
+  ax: number,
+  ay: number,
+  az: number,
+  angle: number,
+): void {
   const s = Math.sin(angle / 2)
-  return [ax * s, ay * s, az * s, Math.cos(angle / 2)]
+  out[0] = ax * s
+  out[1] = ay * s
+  out[2] = az * s
+  out[3] = Math.cos(angle / 2)
 }
 
 // ── TransformGizmo ──────────────────────────────────────────────────────
@@ -382,15 +396,16 @@ export class TransformGizmo {
     this.root.scale.set(s, s, s)
   }
 
-  private _getNDC(e: PointerEvent): [number, number] {
+  private _getNDC(out: [number, number], e: PointerEvent): void {
     const rect = this.canvas.getBoundingClientRect()
-    return [((e.clientX - rect.left) / rect.width) * 2 - 1, -(((e.clientY - rect.top) / rect.height) * 2 - 1)]
+    out[0] = ((e.clientX - rect.left) / rect.width) * 2 - 1
+    out[1] = -(((e.clientY - rect.top) / rect.height) * 2 - 1)
   }
 
-  private _getAxisDirection(axis: GizmoAxis): number[] {
-    if (axis === AXIS_X) return [1, 0, 0]
-    if (axis === AXIS_Y) return [0, 1, 0]
-    return [0, 0, 1]
+  private _getAxisDirection(out: number[], axis: GizmoAxis): void {
+    out[0] = axis === AXIS_X ? 1 : 0
+    out[1] = axis === AXIS_Y ? 1 : 0
+    out[2] = axis === AXIS_Z ? 1 : 0
   }
 
   // ── Raycast ─────────────────────────────────────────────────────────
@@ -475,8 +490,8 @@ export class TransformGizmo {
   private _handlePointerDown(e: PointerEvent): void {
     if (!this.targetObject || e.button !== 0) return
 
-    const [ndcX, ndcY] = this._getNDC(e)
-    const axis = this._hitTestGizmo(ndcX, ndcY)
+    this._getNDC(_gizmoNDC, e)
+    const axis = this._hitTestGizmo(_gizmoNDC[0], _gizmoNDC[1])
     if (axis === null) return
 
     e.preventDefault()
@@ -495,31 +510,33 @@ export class TransformGizmo {
     this.dragStartScale = [s.x, s.y, s.z]
 
     this.camera.updateViewProjection()
-    this.raycaster.setFromCamera([ndcX, ndcY], this.camera)
+    this.raycaster.setFromCamera(_gizmoNDC, this.camera)
 
     if (this.mode === 'translate' || (this.mode === 'scale' && axis !== AXIS_ALL)) {
-      const axisDir = this._getAxisDirection(axis)
+      this._getAxisDirection(_gizmoAxisDir, axis)
       this.dragStartValue = closestPointOnAxis(
         this.raycaster.origin,
         this.raycaster.direction,
         this.dragStartPosition,
-        axisDir,
+        _gizmoAxisDir,
       )
     } else if (this.mode === 'scale' && axis === AXIS_ALL) {
-      this.dragStartValue = ndcY
+      this.dragStartValue = _gizmoNDC[1]
     } else if (this.mode === 'rotate') {
-      const planeNormal = this._getAxisDirection(axis)
-      const hitPoint = [0, 0, 0]
+      this._getAxisDirection(_gizmoAxisDir, axis)
+      _gizmoHitPoint[0] = 0
+      _gizmoHitPoint[1] = 0
+      _gizmoHitPoint[2] = 0
       if (
         rayPlaneIntersection(
-          hitPoint,
+          _gizmoHitPoint,
           this.raycaster.origin,
           this.raycaster.direction,
           this.dragStartPosition,
-          planeNormal,
+          _gizmoAxisDir,
         )
       ) {
-        this.dragStartAngle = this._planeAngle(hitPoint, this.dragStartPosition, axis)
+        this.dragStartAngle = this._planeAngle(_gizmoHitPoint, this.dragStartPosition, axis)
       }
     }
 
@@ -529,10 +546,10 @@ export class TransformGizmo {
   }
 
   private _handlePointerMove(e: PointerEvent): void {
-    const [ndcX, ndcY] = this._getNDC(e)
+    this._getNDC(_gizmoNDC, e)
 
     if (!this.dragging) {
-      const axis = this._hitTestGizmo(ndcX, ndcY)
+      const axis = this._hitTestGizmo(_gizmoNDC[0], _gizmoNDC[1])
       this._setHover(axis)
       this.canvas.style.cursor = axis !== null ? 'grab' : ''
       return
@@ -541,23 +558,31 @@ export class TransformGizmo {
     if (!this.targetObject || this.dragAxis === null) return
 
     this.camera.updateViewProjection()
-    this.raycaster.setFromCamera([ndcX, ndcY], this.camera)
+    this.raycaster.setFromCamera(_gizmoNDC, this.camera)
 
     if (this.mode === 'translate') {
-      const axisDir = this._getAxisDirection(this.dragAxis)
-      const t = closestPointOnAxis(this.raycaster.origin, this.raycaster.direction, this.dragStartPosition, axisDir)
+      this._getAxisDirection(_gizmoAxisDir, this.dragAxis)
+      const t = closestPointOnAxis(
+        this.raycaster.origin,
+        this.raycaster.direction,
+        this.dragStartPosition,
+        _gizmoAxisDir,
+      )
       const delta = t - this.dragStartValue
 
-      const newPos = [...this.dragStartPosition]
-      newPos[this.dragAxis] += delta
+      _gizmoTempVec3[0] = this.dragStartPosition[0]
+      _gizmoTempVec3[1] = this.dragStartPosition[1]
+      _gizmoTempVec3[2] = this.dragStartPosition[2]
+      _gizmoTempVec3[this.dragAxis] += delta
       if (this.translateSnap) {
-        newPos[this.dragAxis] = Math.round(newPos[this.dragAxis] / this.translateSnap) * this.translateSnap
+        _gizmoTempVec3[this.dragAxis] =
+          Math.round(_gizmoTempVec3[this.dragAxis] / this.translateSnap) * this.translateSnap
       }
-      this.targetObject.position.set(newPos[0], newPos[1], newPos[2])
+      this.targetObject.position.set(_gizmoTempVec3[0], _gizmoTempVec3[1], _gizmoTempVec3[2])
       this._syncPosition()
     } else if (this.mode === 'scale') {
       if (this.dragAxis === AXIS_ALL) {
-        const delta = ndcY - this.dragStartValue
+        const delta = _gizmoNDC[1] - this.dragStartValue
         let factor = 1 + delta * 2
         if (this.scaleSnap) factor = Math.round(factor / this.scaleSnap) * this.scaleSnap || this.scaleSnap
         this.targetObject.scale.set(
@@ -566,36 +591,44 @@ export class TransformGizmo {
           this.dragStartScale[2] * factor,
         )
       } else {
-        const axisDir = this._getAxisDirection(this.dragAxis)
-        const t = closestPointOnAxis(this.raycaster.origin, this.raycaster.direction, this.dragStartPosition, axisDir)
-        let factor = 1 + (t - this.dragStartValue)
-        if (this.scaleSnap) factor = Math.round(factor / this.scaleSnap) * this.scaleSnap || this.scaleSnap
-        const newScale = [...this.dragStartScale]
-        newScale[this.dragAxis] = this.dragStartScale[this.dragAxis] * Math.max(0.01, factor)
-        this.targetObject.scale.set(newScale[0], newScale[1], newScale[2])
-      }
-    } else if (this.mode === 'rotate' && this.dragAxis !== null) {
-      const planeNormal = this._getAxisDirection(this.dragAxis)
-      const hitPoint = [0, 0, 0]
-      if (
-        rayPlaneIntersection(
-          hitPoint,
+        this._getAxisDirection(_gizmoAxisDir, this.dragAxis)
+        const t = closestPointOnAxis(
           this.raycaster.origin,
           this.raycaster.direction,
           this.dragStartPosition,
-          planeNormal,
+          _gizmoAxisDir,
+        )
+        let factor = 1 + (t - this.dragStartValue)
+        if (this.scaleSnap) factor = Math.round(factor / this.scaleSnap) * this.scaleSnap || this.scaleSnap
+        _gizmoTempVec3[0] = this.dragStartScale[0]
+        _gizmoTempVec3[1] = this.dragStartScale[1]
+        _gizmoTempVec3[2] = this.dragStartScale[2]
+        _gizmoTempVec3[this.dragAxis] = this.dragStartScale[this.dragAxis] * Math.max(0.01, factor)
+        this.targetObject.scale.set(_gizmoTempVec3[0], _gizmoTempVec3[1], _gizmoTempVec3[2])
+      }
+    } else if (this.mode === 'rotate' && this.dragAxis !== null) {
+      this._getAxisDirection(_gizmoAxisDir, this.dragAxis)
+      _gizmoHitPoint[0] = 0
+      _gizmoHitPoint[1] = 0
+      _gizmoHitPoint[2] = 0
+      if (
+        rayPlaneIntersection(
+          _gizmoHitPoint,
+          this.raycaster.origin,
+          this.raycaster.direction,
+          this.dragStartPosition,
+          _gizmoAxisDir,
         )
       ) {
-        let deltaAngle = this._planeAngle(hitPoint, this.dragStartPosition, this.dragAxis) - this.dragStartAngle
+        let deltaAngle = this._planeAngle(_gizmoHitPoint, this.dragStartPosition, this.dragAxis) - this.dragStartAngle
         if (this.rotateSnap) deltaAngle = Math.round(deltaAngle / this.rotateSnap) * this.rotateSnap
 
         // Apply rotation: convert start euler → quat, apply axis rotation, convert back
-        const startQ = eulerToQuat(this.dragStartRotation[0], this.dragStartRotation[1], this.dragStartRotation[2])
-        const ad = this._getAxisDirection(this.dragAxis)
-        const deltaQ = quatFromAxisAngle(ad[0], ad[1], ad[2], deltaAngle)
-        const newQ = quatMul(deltaQ, startQ)
-        const newEuler = quatToEuler(newQ[0], newQ[1], newQ[2], newQ[3])
-        this.targetObject.rotation.set(newEuler[0], newEuler[1], newEuler[2])
+        eulerToQuat(_gizmoQuat1, this.dragStartRotation[0], this.dragStartRotation[1], this.dragStartRotation[2])
+        quatFromAxisAngle(_gizmoQuat2, _gizmoAxisDir[0], _gizmoAxisDir[1], _gizmoAxisDir[2], deltaAngle)
+        quatMul(_gizmoQuat3, _gizmoQuat2, _gizmoQuat1)
+        quatToEuler(_gizmoEuler, _gizmoQuat3[0], _gizmoQuat3[1], _gizmoQuat3[2], _gizmoQuat3[3])
+        this.targetObject.rotation.set(_gizmoEuler[0], _gizmoEuler[1], _gizmoEuler[2])
       }
     }
 

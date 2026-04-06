@@ -244,6 +244,7 @@ export class AnimationAction {
 
 // Temp quaternion for slerp
 const _tempQuat: [number, number, number, number] = [0, 0, 0, 1]
+const _blendedQuat: [number, number, number, number] = [0, 0, 0, 1]
 
 export class AnimationMixer {
   readonly root: Object3D
@@ -345,34 +346,41 @@ export class AnimationMixer {
         }
         case 'rotation': {
           slerp(_tempQuat, values, off1, values, off2, alpha)
+          if (!node._quaternion) node._quaternion = [0, 0, 0, 1]
           if (w >= 1) {
-            node._quaternion = [_tempQuat[0], _tempQuat[1], _tempQuat[2], _tempQuat[3]]
+            node._quaternion[0] = _tempQuat[0]
+            node._quaternion[1] = _tempQuat[1]
+            node._quaternion[2] = _tempQuat[2]
+            node._quaternion[3] = _tempQuat[3]
           } else {
             // Weight blending: slerp from current quaternion toward target
-            const cur = node._quaternion ?? [0, 0, 0, 1]
-            const blended: [number, number, number, number] = [0, 0, 0, 1]
+            const cur = node._quaternion
             // Use slerp for weight blending
             let dot = cur[0] * _tempQuat[0] + cur[1] * _tempQuat[1] + cur[2] * _tempQuat[2] + cur[3] * _tempQuat[3]
             const sign = dot < 0 ? -1 : 1
             dot = Math.abs(dot)
             if (dot > 0.9999) {
-              blended[0] = lerp(cur[0], _tempQuat[0] * sign, w)
-              blended[1] = lerp(cur[1], _tempQuat[1] * sign, w)
-              blended[2] = lerp(cur[2], _tempQuat[2] * sign, w)
-              blended[3] = lerp(cur[3], _tempQuat[3] * sign, w)
+              _blendedQuat[0] = lerp(cur[0], _tempQuat[0] * sign, w)
+              _blendedQuat[1] = lerp(cur[1], _tempQuat[1] * sign, w)
+              _blendedQuat[2] = lerp(cur[2], _tempQuat[2] * sign, w)
+              _blendedQuat[3] = lerp(cur[3], _tempQuat[3] * sign, w)
             } else {
               const theta = Math.acos(dot)
               const sinTheta = Math.sin(theta)
               const wa = Math.sin((1 - w) * theta) / sinTheta
               const wb = Math.sin(w * theta) / sinTheta
-              blended[0] = cur[0] * wa + _tempQuat[0] * sign * wb
-              blended[1] = cur[1] * wa + _tempQuat[1] * sign * wb
-              blended[2] = cur[2] * wa + _tempQuat[2] * sign * wb
-              blended[3] = cur[3] * wa + _tempQuat[3] * sign * wb
+              _blendedQuat[0] = cur[0] * wa + _tempQuat[0] * sign * wb
+              _blendedQuat[1] = cur[1] * wa + _tempQuat[1] * sign * wb
+              _blendedQuat[2] = cur[2] * wa + _tempQuat[2] * sign * wb
+              _blendedQuat[3] = cur[3] * wa + _tempQuat[3] * sign * wb
             }
             // Normalize
-            const len = Math.sqrt(blended[0] ** 2 + blended[1] ** 2 + blended[2] ** 2 + blended[3] ** 2) || 1
-            node._quaternion = [blended[0] / len, blended[1] / len, blended[2] / len, blended[3] / len]
+            const len =
+              Math.sqrt(_blendedQuat[0] ** 2 + _blendedQuat[1] ** 2 + _blendedQuat[2] ** 2 + _blendedQuat[3] ** 2) || 1
+            node._quaternion[0] = _blendedQuat[0] / len
+            node._quaternion[1] = _blendedQuat[1] / len
+            node._quaternion[2] = _blendedQuat[2] / len
+            node._quaternion[3] = _blendedQuat[3] / len
           }
           break
         }
