@@ -8,12 +8,12 @@
 //    c. Custom shader meshes (per-ShaderMaterial WGSL)
 //    d. Lines (line-list, unlit flat color)
 
+import { createFrustumPlanes, extractFrustumPlanes } from './frustum'
 import { PlaneGeometry } from './geometry'
 import { BackSide, DoubleSide, MeshBasicMaterial, type NanoTexture } from './material'
 import { mat4Ortho, mat4LookAt, mat4Multiply } from './math'
 import { ShaderMaterial } from './shader-material'
 import { AdditiveBlending } from './sprite'
-import { createFrustumPlanes, extractFrustumPlanes } from './frustum'
 
 import type { PerspectiveCamera } from './core'
 import type { BufferGeometry } from './geometry'
@@ -1562,7 +1562,10 @@ struct ObjectData { model: mat4x4f, color: vec4f }
   /** Write bounding sphere (local-space) for compute frustum culling. */
   private writeSphereData(
     idx: number,
-    geo: { boundingSphere: { cx: number; cy: number; cz: number; radius: number } | null; computeBoundingSphere(): void },
+    geo: {
+      boundingSphere: { cx: number; cy: number; cz: number; radius: number } | null
+      computeBoundingSphere(): void
+    },
   ) {
     if (!geo.boundingSphere) geo.computeBoundingSphere()
     const bs = geo.boundingSphere!
