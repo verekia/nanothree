@@ -14,6 +14,7 @@
   "scripts": {
     "dev": "tsup --watch",
     "generate-decoders": "bun scripts/generate-inline-decoders.ts",
+    "prebuild": "bun run generate-decoders",
     "build": "tsup && cp ../README.md README.md",
     "typecheck": "tsgo"
   },
