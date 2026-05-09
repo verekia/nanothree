@@ -10,7 +10,7 @@
     "dev": "bun run --parallel --filter '*' dev",
     "build": "bun run --filter '*' build",
     "start": "bun run --filter '*' start",
-    "typecheck": "bun run --filter '*' typecheck",
+    "typecheck": "tsc -b --noEmit",
     "lint": "oxlint .",
     "lint:fix": "oxlint --fix .",
     "format": "oxfmt .",
@@ -25,14 +25,5 @@
     "husky": "9.1.7",
     "oxfmt": "0.48.0",
     "oxlint": "1.63.0"
-  },
-  "warden": {
-    "checks": {
-      "typecheckScript": {
-        "modes": {
-          "nanothree": "bun-filter-all"
-        }
-      }
-    }
   }
 }
