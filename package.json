@@ -10,20 +10,29 @@
     "dev": "bun run --parallel --filter '*' dev",
     "build": "bun run --filter '*' build",
     "start": "bun run --filter '*' start",
-    "typecheck": "tsc -b --noEmit",
+    "typecheck": "bun run --filter '*' typecheck",
     "lint": "oxlint .",
     "lint:fix": "oxlint --fix .",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "test": "bun test",
     "warden": "warden",
-    "all": "bun run format:check && bun run lint && bun run typecheck && bun run test && bun run warden",
+    "all": "bun run format:check && bun run lint && bun run typecheck && bun run warden && bun run test",
     "pub": "bun run --filter 'nanothree' build && npm publish --workspace library"
   },
   "devDependencies": {
-    "@verekia/warden": "0.0.1",
+    "@verekia/warden": "0.0.3",
     "husky": "9.1.7",
     "oxfmt": "0.48.0",
     "oxlint": "1.63.0"
+  },
+  "warden": {
+    "checks": {
+      "typecheckScript": {
+        "modes": {
+          "nanothree": "bun-filter-all"
+        }
+      }
+    }
   }
 }
