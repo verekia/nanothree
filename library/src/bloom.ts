@@ -1,16 +1,31 @@
-// Minimum-viable bloom post-process pass.
+// HDR bloom post-process pass.
 //
 // Pipeline:
-//   1. Threshold + downsample: sceneTexture -> mip[0]
+//   1. Threshold + downsample: sceneTexture (HDR) -> mip[0] (HDR)
 //   2. Plain downsample chain: mip[i] -> mip[i+1] (3 more times)
 //   3. Additive upsample (tent 3x3): mip[i+1] -> mip[i]
 //      Each level keeps the contribution of the previous downsample,
 //      so the final mip[0] is a sum of progressively blurred scales.
-//   4. Composite: scene + mip[0] * strength -> canvas
+//   4. Composite: tone-map(scene + mip[0] * strength) -> canvas (LDR)
 //
-// LDR (matches the canvas format). When emissive / HDR lands, swap the
-// scene + mip-chain format to rgba16float and add a tone-map step in the
-// composite shader.
+// The scene + mip chain live in `sceneFormat` (HDR rgba16float). The composite
+// pipeline writes to `outputFormat` (canvas LDR).
+//
+// Tone-mapping is opt-in via `BloomPass.toneMapping`. Default `NoToneMapping`
+// hard-clamps each channel to [0,1] — matches the punchy pre-HDR look. Set to
+// `ACESFilmicToneMapping` for a soft shoulder + highlight desaturation.
+
+export const NoToneMapping = 0
+export const ACESFilmicToneMapping = 1
+export const SoftToneMapping = 2
+export const AgXToneMapping = 3
+export const NeutralToneMapping = 4
+export type ToneMapping =
+  | typeof NoToneMapping
+  | typeof ACESFilmicToneMapping
+  | typeof SoftToneMapping
+  | typeof AgXToneMapping
+  | typeof NeutralToneMapping
 
 const FULLSCREEN_VS = /* wgsl */ `
 struct VSOut {
@@ -86,12 +101,108 @@ const COMPOSITE_FS = /* wgsl */ `
 @group(0) @binding(0) var sceneTex: texture_2d<f32>;
 @group(0) @binding(1) var bloomTex: texture_2d<f32>;
 @group(0) @binding(2) var smp: sampler;
-@group(0) @binding(3) var<uniform> params: vec4f; // x=threshold, y=strength
+@group(0) @binding(3) var<uniform> params: vec4f; // x=threshold, y=strength, z=toneMapping mode
+
+// ACES filmic tone map (Narkowicz approximation). HDR -> LDR with a
+// soft shoulder; keeps colored midtones, rolls off highlights to white.
+// Crushes mid-range saturation on LDR-input scenes — use for cinematic feel.
+fn tonemapACES(c: vec3f) -> vec3f {
+  let a = 2.51;
+  let b = 0.03;
+  let cc = 2.43;
+  let d = 0.59;
+  let e = 0.14;
+  return saturate((c * (a * c + b)) / (c * (cc * c + d) + e));
+}
+
+// Soft shoulder above a 0.8 knee. Identity for c <= 0.8, smooth asymptotic
+// roll-off above. C0+C1 continuous at the knee so there is no visible seam.
+// Best choice when you want LDR-look preserved but emissive >1 to soft-clip.
+fn tonemapSoft(c: vec3f) -> vec3f {
+  let knee = vec3f(0.8);
+  let oneMinusKnee = vec3f(1.0) - knee;
+  let above = knee + oneMinusKnee * (c - knee) / ((c - knee) + oneMinusKnee);
+  return saturate(select(above, c, c < knee));
+}
+
+fn agxContrast(x: vec3f) -> vec3f {
+  let x2 = x * x;
+  let x4 = x2 * x2;
+  return 15.5 * x4 * x2
+       - 40.14 * x4 * x
+       + 31.96 * x4
+       - 6.868 * x2 * x
+       + 0.4298 * x2
+       + 0.1191 * x
+       - 0.00232;
+}
+
+// AgX (Sobotka). Modern filmic curve that preserves saturation much better
+// than ACES. Uses an LMS-like input matrix, log-encode, sigmoid contrast,
+// then an inverse matrix + EOTF. Reference: iolite-engine.com (minimal AgX).
+fn tonemapAgX(c: vec3f) -> vec3f {
+  let agxMat = mat3x3f(
+    vec3f(0.842479062253094, 0.0423282422610123, 0.0423756549057051),
+    vec3f(0.0784335999999992, 0.878468636469772, 0.0784336),
+    vec3f(0.0792237451477643, 0.0791661274605434, 0.879142973793104),
+  );
+  let agxInv = mat3x3f(
+    vec3f(1.19687900512017, -0.0528968517574562, -0.0529716355144438),
+    vec3f(-0.0980208811401368, 1.15190312990417, -0.0980434501171241),
+    vec3f(-0.0990297440797205, -0.0989611768448433, 1.15107367264116),
+  );
+  let minEv = -12.47393;
+  let maxEv = 4.026069;
+
+  var v = agxMat * c;
+  v = clamp(log2(max(v, vec3f(1e-10))), vec3f(minEv), vec3f(maxEv));
+  v = (v - vec3f(minEv)) / (maxEv - minEv);
+  v = agxContrast(v);
+  v = agxInv * v;
+  return saturate(pow(max(v, vec3f(0.0)), vec3f(2.2)));
+}
+
+// Khronos PBR Neutral. Designed for "no-grade" game look: identity below
+// 0.76, soft compression above with mild highlight desaturation. Preserves
+// mid-tone color better than ACES.
+fn tonemapNeutral(c: vec3f) -> vec3f {
+  let startCompression = 0.76;
+  let desaturation = 0.15;
+  var col = c;
+  let lo = min(col.r, min(col.g, col.b));
+  let offset = select(0.04, lo - 6.25 * lo * lo, lo < 0.08);
+  col = col - vec3f(offset);
+  let peak = max(col.r, max(col.g, col.b));
+  if (peak < startCompression) {
+    return col;
+  }
+  let d = 1.0 - startCompression;
+  let newPeak = 1.0 - d * d / (peak + d - startCompression);
+  col = col * (newPeak / peak);
+  let g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
+  return mix(col, vec3f(newPeak), vec3f(g));
+}
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let scene = textureSample(sceneTex, smp, in.uv).rgb;
-  let bloom = textureSample(bloomTex, smp, in.uv).rgb;
-  return vec4f(scene + bloom * params.y, 1.0);
+  let bloomCol = textureSample(bloomTex, smp, in.uv).rgb;
+  let combined = scene + bloomCol * params.y;
+
+  // params.z: 0=None, 1=ACES, 2=Soft, 3=AgX, 4=Neutral
+  let mode = i32(params.z + 0.5);
+  var mapped: vec3f;
+  if (mode == 1) {
+    mapped = tonemapACES(combined);
+  } else if (mode == 2) {
+    mapped = tonemapSoft(combined);
+  } else if (mode == 3) {
+    mapped = tonemapAgX(combined);
+  } else if (mode == 4) {
+    mapped = tonemapNeutral(combined);
+  } else {
+    mapped = saturate(combined);
+  }
+  return vec4f(mapped, 1.0);
 }
 `
 
@@ -100,10 +211,23 @@ const BLOOM_MIPS = 4
 export class BloomPass {
   enabled = false
   strength = 0.6
-  threshold = 0.85
+  /**
+   * HDR brightness above which pixels contribute to bloom. Lit Lambert
+   * surfaces typically stay <=1.0; emissive can go well above. Defaults
+   * to 1.0 so only emissive blooms by default.
+   */
+  threshold = 1.0
+  /**
+   * Tone-mapping applied at the composite step. `NoToneMapping` (default)
+   * hard-clamps each channel to [0,1] — preserves the punchy LDR look but
+   * loses highlight detail above 1. `ACESFilmicToneMapping` applies a soft
+   * shoulder that bleaches highlights to white.
+   */
+  toneMapping: ToneMapping = NoToneMapping
 
   private device!: GPUDevice
-  private format!: GPUTextureFormat
+  private sceneFormat!: GPUTextureFormat // HDR
+  private outputFormat!: GPUTextureFormat // canvas LDR
   private width = 0
   private height = 0
 
@@ -131,9 +255,10 @@ export class BloomPass {
   private upsampleBindGroups: GPUBindGroup[] = []
   private compositeBindGroup: GPUBindGroup | null = null
 
-  init(device: GPUDevice, format: GPUTextureFormat) {
+  init(device: GPUDevice, sceneFormat: GPUTextureFormat, outputFormat: GPUTextureFormat) {
     this.device = device
-    this.format = format
+    this.sceneFormat = sceneFormat
+    this.outputFormat = outputFormat
 
     this.sampler = device.createSampler({
       magFilter: 'linear',
@@ -177,7 +302,7 @@ export class BloomPass {
     this.thresholdPipeline = device.createRenderPipeline({
       layout: downsamplePipelineLayout,
       vertex: { module: thresholdModule, entryPoint: 'vs' },
-      fragment: { module: thresholdModule, entryPoint: 'fs', targets: [{ format }] },
+      fragment: { module: thresholdModule, entryPoint: 'fs', targets: [{ format: sceneFormat }] },
       primitive: { topology: 'triangle-list' },
     })
 
@@ -185,7 +310,7 @@ export class BloomPass {
     this.downsamplePipeline = device.createRenderPipeline({
       layout: plainPipelineLayout,
       vertex: { module: downsampleModule, entryPoint: 'vs' },
-      fragment: { module: downsampleModule, entryPoint: 'fs', targets: [{ format }] },
+      fragment: { module: downsampleModule, entryPoint: 'fs', targets: [{ format: sceneFormat }] },
       primitive: { topology: 'triangle-list' },
     })
 
@@ -198,7 +323,7 @@ export class BloomPass {
         entryPoint: 'fs',
         targets: [
           {
-            format,
+            format: sceneFormat,
             blend: {
               color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
               alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
@@ -213,7 +338,7 @@ export class BloomPass {
     this.compositePipeline = device.createRenderPipeline({
       layout: compositePipelineLayout,
       vertex: { module: compositeModule, entryPoint: 'vs' },
-      fragment: { module: compositeModule, entryPoint: 'fs', targets: [{ format }] },
+      fragment: { module: compositeModule, entryPoint: 'fs', targets: [{ format: outputFormat }] },
       primitive: { topology: 'triangle-list' },
     })
   }
@@ -230,7 +355,7 @@ export class BloomPass {
 
     this.sceneTexture = this.device.createTexture({
       size: [width, height],
-      format: this.format,
+      format: this.sceneFormat,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     })
     this.sceneView = this.sceneTexture.createView()
@@ -240,7 +365,7 @@ export class BloomPass {
       const h = Math.max(1, height >> (i + 1))
       const t = this.device.createTexture({
         size: [w, h],
-        format: this.format,
+        format: this.sceneFormat,
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
       })
       this.mipTextures.push(t)
@@ -296,6 +421,7 @@ export class BloomPass {
   encode(encoder: GPUCommandEncoder, canvasView: GPUTextureView) {
     this.paramsStaging[0] = this.threshold
     this.paramsStaging[1] = this.strength
+    this.paramsStaging[2] = this.toneMapping
     this.device.queue.writeBuffer(this.paramsBuffer, 0, this.paramsStaging as unknown as ArrayBuffer)
 
     // Threshold downsample: scene -> mip[0]

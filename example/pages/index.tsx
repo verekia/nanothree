@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
+  ACESFilmicToneMapping,
+  AgXToneMapping,
   AmbientLight,
   AnimationMixer,
   BoxGeometry,
@@ -13,16 +15,20 @@ import {
   GLTFLoader,
   Mesh,
   MeshLambertMaterial,
+  NeutralToneMapping,
+  NoToneMapping,
   OrbitControls,
   PerspectiveCamera,
   PlaneGeometry,
   Scene,
+  SoftToneMapping,
   SphereGeometry,
   TetrahedronGeometry,
   TorusGeometry,
   WebGPURenderer,
 } from 'nanothree'
 
+import type { ToneMapping } from 'nanothree'
 import type { BufferGeometry } from 'nanothree'
 
 // ─── Geometry generators with random variations ─────────────────────
@@ -140,6 +146,14 @@ const STATIC_CASES = [
 
 const SKINNED_COUNTS = [100, 200, 500, 1000] as const
 
+const TONEMAP_OPTIONS: ReadonlyArray<{ label: string; value: ToneMapping }> = [
+  { label: 'None', value: NoToneMapping },
+  { label: 'Soft', value: SoftToneMapping },
+  { label: 'Neutral', value: NeutralToneMapping },
+  { label: 'AgX', value: AgXToneMapping },
+  { label: 'ACES', value: ACESFilmicToneMapping },
+]
+
 // ─── Page ───────────────────────────────────────────────────────────
 
 const IndexPage = () => {
@@ -153,6 +167,9 @@ const IndexPage = () => {
   const [bloom, setBloom] = useState(false)
   const bloomRef = useRef(false)
   bloomRef.current = bloom
+  const [toneMapping, setToneMapping] = useState<ToneMapping>(NoToneMapping)
+  const toneMappingRef = useRef<ToneMapping>(NoToneMapping)
+  toneMappingRef.current = toneMapping
   const [fps, setFps] = useState(0)
   const [drawCalls, setDrawCalls] = useState(0)
   const [triangles, setTriangles] = useState(0)
@@ -224,10 +241,11 @@ const IndexPage = () => {
     const animate = async () => {
       if (!inited) {
         await renderer.init()
-        // LDR bloom: lower threshold + higher strength so it's visible on
-        // the test cases' muted random colors (lit faces hit ~0.5 brightness).
-        renderer.bloom.threshold = 0.5
-        renderer.bloom.strength = 1.2
+        // HDR bloom: lit Lambert surfaces top out near 1.0; emissive at
+        // intensity 4 sits at 4.0 in HDR. Threshold 1.0 lets only emissive
+        // pixels bloom — lit surfaces stay clean.
+        renderer.bloom.threshold = 1.0
+        renderer.bloom.strength = 0.8
         inited = true
       }
       raf = requestAnimationFrame(animate)
@@ -253,8 +271,11 @@ const IndexPage = () => {
       }
       const bloomOn = bloomRef.current
       renderer.bloom.enabled = bloomOn
+      renderer.bloom.toneMapping = toneMappingRef.current
       if (bloomOn !== lastBloom) {
-        const intensity = bloomOn ? 1 : 0
+        // In HDR, intensity 4 pushes emissive well above the bloom threshold
+        // so emissive surfaces clearly bloom while lit Lambert stays clean.
+        const intensity = bloomOn ? 4 : 0
         for (const m of emissiveMats) m.emissiveIntensity = intensity
         lastBloom = bloomOn
       }
@@ -310,7 +331,7 @@ const IndexPage = () => {
     ) => {
       if (node.isSkinnedMesh && node.material) {
         node.material.emissive = emissive
-        node.material.emissiveIntensity = bloomRef.current ? 1 : 0
+        node.material.emissiveIntensity = bloomRef.current ? 4 : 0
         emissiveMats.push(node.material)
       }
       for (const child of node.children) applySkinnedEmissive(child as typeof node, emissive)
@@ -362,10 +383,10 @@ const IndexPage = () => {
     const animate = async () => {
       if (!inited) {
         await renderer.init()
-        // Textured characters rarely have pixels above 0.85, so drop the
-        // threshold and crank strength so bloom is visible when toggled on.
-        renderer.bloom.threshold = 0.5
-        renderer.bloom.strength = 1.5
+        // HDR bloom: textured character pixels stay <=1; emissive at
+        // intensity 4 sits at ~4.0. Threshold 1.0 isolates emissive glow.
+        renderer.bloom.threshold = 1.0
+        renderer.bloom.strength = 0.8
         inited = true
       }
       raf = requestAnimationFrame(animate)
@@ -387,8 +408,11 @@ const IndexPage = () => {
       ground.receiveShadow = s
       const bloomOn = bloomRef.current
       renderer.bloom.enabled = bloomOn
+      renderer.bloom.toneMapping = toneMappingRef.current
       if (bloomOn !== lastBloom) {
-        const intensity = bloomOn ? 1 : 0
+        // In HDR, intensity 4 pushes emissive well above the bloom threshold
+        // so emissive surfaces clearly bloom while lit Lambert stays clean.
+        const intensity = bloomOn ? 4 : 0
         for (const m of emissiveMats) m.emissiveIntensity = intensity
         lastBloom = bloomOn
       }
@@ -506,6 +530,17 @@ const IndexPage = () => {
         >
           Bloom {bloom ? 'ON' : 'OFF'}
         </button>
+        <select
+          value={toneMapping}
+          onChange={e => setToneMapping(Number(e.target.value) as ToneMapping)}
+          className="cursor-pointer rounded bg-white/10 px-3 py-1.5 text-white/80 hover:bg-white/20"
+        >
+          {TONEMAP_OPTIONS.map(o => (
+            <option key={o.value} value={o.value}>
+              Tonemap: {o.label}
+            </option>
+          ))}
+        </select>
       </div>
     </div>
   )
