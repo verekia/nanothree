@@ -97,8 +97,10 @@ export class Object3D {
   /**
    * When set, this quaternion (x, y, z, w) is used instead of euler rotation
    * for world matrix composition. Used by skeletal animation to avoid gimbal lock.
+   * Stored as a Float32Array so it can be written in place each frame without
+   * allocation churn.
    */
-  _quaternion: [number, number, number, number] | null = null
+  _quaternion: Float32Array | null = null
 
   parent: Object3D | null = null
   readonly children: Object3D[] = []

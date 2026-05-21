@@ -62,10 +62,13 @@ export class Scene extends Object3D {
       this._frustumCulling = false
     }
 
-    this._traverseChildren(this._worldMatrix, this.children)
+    // Pass null at the root so direct scene children take the no-parent fast
+    // path in Object3D._updateWorldMatrix (composes TRS straight into the
+    // world matrix, skipping the redundant identity-matrix multiply).
+    this._traverseChildren(null, this.children)
   }
 
-  private _traverseChildren(parentWorld: Float32Array, children: Object3D[]) {
+  private _traverseChildren(parentWorld: Float32Array | null, children: Object3D[]) {
     for (let i = 0; i < children.length; i++) {
       const child = children[i]
       if (!child.visible) continue
@@ -130,11 +133,13 @@ export class Scene extends Object3D {
     const wy = m[1] * lx + m[5] * ly + m[9] * lz + m[13]
     const wz = m[2] * lx + m[6] * ly + m[10] * lz + m[14]
 
-    // Scale the radius by the maximum axis scale of the world matrix
-    const sx = Math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
-    const sy = Math.sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6])
-    const sz = Math.sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10])
-    const maxScale = Math.max(sx, sy, sz)
+    // Scale the radius by the maximum axis scale of the world matrix.
+    // Compare squared column lengths and take a single sqrt of the largest.
+    const sx2 = m[0] * m[0] + m[1] * m[1] + m[2] * m[2]
+    const sy2 = m[4] * m[4] + m[5] * m[5] + m[6] * m[6]
+    const sz2 = m[8] * m[8] + m[9] * m[9] + m[10] * m[10]
+    const maxScale2 = sx2 > sy2 ? (sx2 > sz2 ? sx2 : sz2) : sy2 > sz2 ? sy2 : sz2
+    const maxScale = Math.sqrt(maxScale2)
 
     return sphereInFrustum(this._frustumPlanes, wx, wy, wz, bs.radius * maxScale)
   }

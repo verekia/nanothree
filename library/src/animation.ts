@@ -19,14 +19,7 @@ function lerp(a: number, b: number, t: number): number {
 }
 
 /** Spherical linear interpolation for quaternions. */
-function slerp(
-  out: [number, number, number, number],
-  a: Float32Array,
-  aOff: number,
-  b: Float32Array,
-  bOff: number,
-  t: number,
-): void {
+function slerp(out: Float32Array, a: Float32Array, aOff: number, b: Float32Array, bOff: number, t: number): void {
   let ax = a[aOff],
     ay = a[aOff + 1],
     az = a[aOff + 2],
@@ -140,6 +133,9 @@ export class AnimationAction {
   private _fadeDuration = 0
   private _fadeElapsed = 0
   private _fadeDirection: 'in' | 'out' | null = null
+  // Cached keyframe index hint per track for amortized O(1) lookup.
+  // Lazily sized on first apply.
+  _lastKeyIndices: Int32Array | null = null
 
   constructor(clip: AnimationClip) {
     this.clip = clip
@@ -243,7 +239,8 @@ export class AnimationAction {
 // ── AnimationMixer ───────────────────────────────────────────────────
 
 // Temp quaternion for slerp
-const _tempQuat: [number, number, number, number] = [0, 0, 0, 1]
+const _tempQuat = new Float32Array(4)
+_tempQuat[3] = 1
 
 export class AnimationMixer {
   readonly root: Object3D
@@ -302,27 +299,36 @@ export class AnimationMixer {
   private _applyAction(action: AnimationAction): void {
     const t = action.time
     const w = action.weight
+    const tracks = action.clip.tracks
 
-    for (const track of action.clip.tracks) {
+    // Lazy-allocate per-track keyframe hint array. Track set is immutable once
+    // the clip is constructed, so a single allocation per action suffices.
+    let hints = action._lastKeyIndices
+    if (!hints || hints.length !== tracks.length) {
+      hints = new Int32Array(tracks.length)
+      action._lastKeyIndices = hints
+    }
+
+    for (let ti = 0; ti < tracks.length; ti++) {
+      const track = tracks[ti]
       const node = this.nodeMap!.get(track.nodeIndex)
       if (!node) continue
 
       const times = track.times
       const values = track.values
       const stride = track.stride
+      const numKeys = times.length
+      if (numKeys === 0) continue
 
-      // Find the two keyframes to interpolate between
-      let i1 = 0
-      for (let i = 0; i < times.length - 1; i++) {
-        if (t >= times[i] && t < times[i + 1]) {
-          i1 = i
-          break
-        }
-        if (i === times.length - 2) {
-          i1 = i // clamp to last segment
-        }
-      }
-      const i2 = Math.min(i1 + 1, times.length - 1)
+      // Amortized O(1) keyframe lookup: resume from last hint, advance forward,
+      // rewind on loop wrap (detected when t falls below current segment start).
+      let i1 = hints[ti]
+      if (i1 < 0) i1 = 0
+      else if (i1 > numKeys - 2) i1 = numKeys > 1 ? numKeys - 2 : 0
+      if (t < times[i1]) i1 = 0
+      while (i1 < numKeys - 2 && t >= times[i1 + 1]) i1++
+      hints[ti] = i1
+      const i2 = i1 + 1 < numKeys ? i1 + 1 : i1
 
       const t1 = times[i1]
       const t2 = times[i2]
@@ -345,34 +351,52 @@ export class AnimationMixer {
         }
         case 'rotation': {
           slerp(_tempQuat, values, off1, values, off2, alpha)
+          let q = node._quaternion
+          if (!q) {
+            q = new Float32Array(4)
+            q[3] = 1
+            node._quaternion = q
+          }
           if (w >= 1) {
-            node._quaternion = [_tempQuat[0], _tempQuat[1], _tempQuat[2], _tempQuat[3]]
+            q[0] = _tempQuat[0]
+            q[1] = _tempQuat[1]
+            q[2] = _tempQuat[2]
+            q[3] = _tempQuat[3]
           } else {
-            // Weight blending: slerp from current quaternion toward target
-            const cur = node._quaternion ?? [0, 0, 0, 1]
-            const blended: [number, number, number, number] = [0, 0, 0, 1]
-            // Use slerp for weight blending
-            let dot = cur[0] * _tempQuat[0] + cur[1] * _tempQuat[1] + cur[2] * _tempQuat[2] + cur[3] * _tempQuat[3]
+            // Weighted slerp from current quaternion toward _tempQuat, in place.
+            const cx = q[0],
+              cy = q[1],
+              cz = q[2],
+              cw = q[3]
+            const tx = _tempQuat[0],
+              ty = _tempQuat[1],
+              tz = _tempQuat[2],
+              tw = _tempQuat[3]
+            let dot = cx * tx + cy * ty + cz * tz + cw * tw
             const sign = dot < 0 ? -1 : 1
-            dot = Math.abs(dot)
+            dot = dot < 0 ? -dot : dot
+            let bx: number, by: number, bz: number, bw: number
             if (dot > 0.9999) {
-              blended[0] = lerp(cur[0], _tempQuat[0] * sign, w)
-              blended[1] = lerp(cur[1], _tempQuat[1] * sign, w)
-              blended[2] = lerp(cur[2], _tempQuat[2] * sign, w)
-              blended[3] = lerp(cur[3], _tempQuat[3] * sign, w)
+              bx = lerp(cx, tx * sign, w)
+              by = lerp(cy, ty * sign, w)
+              bz = lerp(cz, tz * sign, w)
+              bw = lerp(cw, tw * sign, w)
             } else {
               const theta = Math.acos(dot)
               const sinTheta = Math.sin(theta)
               const wa = Math.sin((1 - w) * theta) / sinTheta
               const wb = Math.sin(w * theta) / sinTheta
-              blended[0] = cur[0] * wa + _tempQuat[0] * sign * wb
-              blended[1] = cur[1] * wa + _tempQuat[1] * sign * wb
-              blended[2] = cur[2] * wa + _tempQuat[2] * sign * wb
-              blended[3] = cur[3] * wa + _tempQuat[3] * sign * wb
+              bx = cx * wa + tx * sign * wb
+              by = cy * wa + ty * sign * wb
+              bz = cz * wa + tz * sign * wb
+              bw = cw * wa + tw * sign * wb
             }
-            // Normalize
-            const len = Math.sqrt(blended[0] ** 2 + blended[1] ** 2 + blended[2] ** 2 + blended[3] ** 2) || 1
-            node._quaternion = [blended[0] / len, blended[1] / len, blended[2] / len, blended[3] / len]
+            const len = Math.sqrt(bx * bx + by * by + bz * bz + bw * bw) || 1
+            const inv = 1 / len
+            q[0] = bx * inv
+            q[1] = by * inv
+            q[2] = bz * inv
+            q[3] = bw * inv
           }
           break
         }

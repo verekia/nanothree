@@ -217,7 +217,7 @@ function cloneObject3D(src: Object3D): Object3D {
   dst.visible = src.visible
   dst.castShadow = src.castShadow
   dst.receiveShadow = src.receiveShadow
-  if (src._quaternion) dst._quaternion = [...src._quaternion]
+  if (src._quaternion) dst._quaternion = new Float32Array(src._quaternion)
   if ((src as any)._gltfNodeIndex !== undefined) {
     ;(dst as any)._gltfNodeIndex = (src as any)._gltfNodeIndex
   }
@@ -721,8 +721,12 @@ async function buildScene(
           obj.position.set(nodeDef.translation[0], nodeDef.translation[1], nodeDef.translation[2])
         }
         if (nodeDef.rotation) {
-          const [qx, qy, qz, qw] = nodeDef.rotation
-          obj._quaternion = [qx, qy, qz, qw]
+          const q = new Float32Array(4)
+          q[0] = nodeDef.rotation[0]
+          q[1] = nodeDef.rotation[1]
+          q[2] = nodeDef.rotation[2]
+          q[3] = nodeDef.rotation[3]
+          obj._quaternion = q
         }
         if (nodeDef.scale) {
           obj.scale.set(nodeDef.scale[0], nodeDef.scale[1], nodeDef.scale[2])

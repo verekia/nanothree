@@ -1449,17 +1449,26 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     const customMeshes: Mesh[] = []
     const lines: Line[] = []
 
+    // Use tag flags (isShaderMaterial / isBasic) instead of instanceof — for
+    // 20k+ meshes per frame, instanceof's prototype-chain walk shows up in
+    // profiles, while monomorphic field reads stay in V8's inline cache.
     for (let i = 0; i < scene.meshes.length; i++) {
       const m = scene.meshes[i]
-      if (m.material instanceof ShaderMaterial) customMeshes.push(m)
-      else if (m.material instanceof MeshBasicMaterial) {
-        if (m.material.wireframe) wireframeMeshes.push(m)
-        else if (m.material.vertexColors && m.geometry._hasVertexColors) vertexColorBasicMeshes.push(m)
+      const mat = m.material as unknown as {
+        isShaderMaterial?: boolean
+        isBasic?: boolean
+        wireframe?: boolean
+        vertexColors?: boolean
+        hasTexture?: boolean
+      }
+      if (mat.isShaderMaterial) customMeshes.push(m)
+      else if (mat.isBasic) {
+        if (mat.wireframe) wireframeMeshes.push(m)
+        else if (mat.vertexColors && m.geometry._hasVertexColors) vertexColorBasicMeshes.push(m)
         else basicMeshes.push(m)
-      } else if ((m.material as any).wireframe) wireframeMeshes.push(m)
-      else if ((m.material as MeshLambertMaterial).vertexColors && m.geometry._hasVertexColors)
-        vertexColorMeshes.push(m)
-      else if ((m.material as MeshLambertMaterial).hasTexture) texturedMeshes.push(m)
+      } else if (mat.wireframe) wireframeMeshes.push(m)
+      else if (mat.vertexColors && m.geometry._hasVertexColors) vertexColorMeshes.push(m)
+      else if (mat.hasTexture) texturedMeshes.push(m)
       else solidMeshes.push(m)
     }
     for (let i = 0; i < scene.lines.length; i++) lines.push(scene.lines[i])
