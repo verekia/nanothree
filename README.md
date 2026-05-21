@@ -376,6 +376,14 @@ nanothree follows Three.js naming conventions but differs in several ways:
 | **Orbit controls**  | `OrbitControls` class                               | Not included (see example for manual implementation)          |
 | **React bindings**  | `@react-three/fiber`                                | Not included                                                  |
 
+## Device Compatibility
+
+Google Pixel 10 ships with an Imagination Technologies PowerVR DXT GPU (adapter info: `vendor: "img-tec"`, `architecture: "d-series"`) whose `copyExternalImageToTexture` silently produces an all-zero texture. Without a workaround, textured meshes — including skinned `GLTF` characters — render as fully-transparent pixels because the fragment shaders emit `texColor.a` into an alpha-blended pipeline. Shadows still appear because the shadow pass doesn't sample textures.
+
+`WebGPURenderer` detects this adapter during `init()` and falls back to uploading texture pixels via `device.queue.writeTexture` after rasterising the source image to a 2D canvas. No application-level changes are required.
+
+If you maintain your own WebGPU code, the same Pixel 10 workaround is published standalone as [gputex](https://www.npmjs.com/package/gputex).
+
 ## Bundle Size
 
 The library builds into three chunks, loaded on demand:
