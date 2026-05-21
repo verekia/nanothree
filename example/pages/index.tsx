@@ -167,6 +167,9 @@ const IndexPage = () => {
   const [bloom, setBloom] = useState(false)
   const bloomRef = useRef(false)
   bloomRef.current = bloom
+  const [p3, setP3] = useState(false)
+  const p3Ref = useRef(false)
+  p3Ref.current = p3
   const [toneMapping, setToneMapping] = useState<ToneMapping>(SoftToneMapping)
   const toneMappingRef = useRef<ToneMapping>(SoftToneMapping)
   toneMappingRef.current = toneMapping
@@ -296,6 +299,7 @@ const IndexPage = () => {
       renderer.bloom.strength = bloomStrengthRef.current
       renderer.bloom.radius = bloomRadiusRef.current
       renderer.bloom.threshold = bloomThresholdRef.current
+      renderer.colorSpace = p3Ref.current ? 'p3' : 'srgb'
       // Drive emissive contribution from the slider when bloom is on; cut to
       // zero when off so the scene shows pure Lambert color.
       const ei = bloomOn ? emissiveIntensityRef.current : 0
@@ -437,6 +441,7 @@ const IndexPage = () => {
       renderer.bloom.strength = bloomStrengthRef.current
       renderer.bloom.radius = bloomRadiusRef.current
       renderer.bloom.threshold = bloomThresholdRef.current
+      renderer.colorSpace = p3Ref.current ? 'p3' : 'srgb'
       // Drive emissive contribution from the slider when bloom is on; cut to
       // zero when off so the scene shows pure Lambert color.
       const ei = bloomOn ? emissiveIntensityRef.current : 0
@@ -636,6 +641,12 @@ const IndexPage = () => {
             className={`cursor-pointer rounded px-3 py-1.5 ${bloom ? 'bg-fuchsia-500 text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
           >
             Bloom {bloom ? 'ON' : 'OFF'}
+          </button>
+          <button
+            onClick={() => setP3(v => !v)}
+            className={`cursor-pointer rounded px-3 py-1.5 ${p3 ? 'bg-emerald-500 text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
+          >
+            P3 {p3 ? 'ON' : 'OFF'}
           </button>
           <select
             value={toneMapping}

@@ -906,6 +906,10 @@ export class WebGPURenderer {
   // (currently: Pixel 10 PowerVR img-tec/d-series).
   private _needsWriteTextureWorkaround = false
 
+  // Canvas display color space. 'p3' passes the same RGB values through to
+  // a wider-gamut output (an sRGB 1,0,0 becomes a P3 1,0,0).
+  private _colorSpace: 'srgb' | 'p3' = 'srgb'
+
   /** Per-frame render statistics, updated after each render() call. */
   info = { drawCalls: 0, triangles: 0 }
 
@@ -933,6 +937,29 @@ export class WebGPURenderer {
     return this.canvas
   }
 
+  /**
+   * Canvas output color space. `'srgb'` (default) or `'p3'`. In P3 mode the
+   * same RGB values are reinterpreted in the wider P3 gamut — an sRGB 1,0,0
+   * becomes a P3 1,0,0 (a more saturated red on capable displays).
+   */
+  get colorSpace(): 'srgb' | 'p3' {
+    return this._colorSpace
+  }
+  set colorSpace(v: 'srgb' | 'p3') {
+    if (this._colorSpace === v) return
+    this._colorSpace = v
+    if (this.device && this.context) this._configureContext()
+  }
+
+  private _configureContext() {
+    this.context.configure({
+      device: this.device,
+      format: this.format,
+      alphaMode: 'premultiplied',
+      colorSpace: this._colorSpace === 'p3' ? 'display-p3' : 'srgb',
+    })
+  }
+
   async init() {
     if (!navigator.gpu) throw new Error('WebGPU not supported')
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
@@ -950,7 +977,7 @@ export class WebGPURenderer {
     const dpr = window.devicePixelRatio
     this.canvas.width = (this.canvas.clientWidth * dpr) | 0
     this.canvas.height = (this.canvas.clientHeight * dpr) | 0
-    this.context.configure({ device: this.device, format: this.format, alphaMode: 'premultiplied' })
+    this._configureContext()
 
     const align = this.device.limits.minStorageBufferOffsetAlignment
     this.objectStride = Math.ceil((OBJECT_FLOATS * 4) / align) * align
