@@ -882,6 +882,10 @@ export class WebGPURenderer {
 
   shadowMap = { enabled: false }
 
+  // True when the adapter requires the writeTexture upload workaround
+  // (currently: Pixel 10 PowerVR img-tec/d-series).
+  private _needsWriteTextureWorkaround = false
+
   /** Per-frame render statistics, updated after each render() call. */
   info = { drawCalls: 0, triangles: 0 }
 
@@ -913,6 +917,11 @@ export class WebGPURenderer {
     if (!navigator.gpu) throw new Error('WebGPU not supported')
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
     if (!adapter) throw new Error('No WebGPU adapter found')
+    // Pixel 10 (Imagination Technologies PowerVR DXT) ships with a broken
+    // copyExternalImageToTexture that produces an all-zero texture. Detect
+    // the adapter and fall back to writeTexture with raw pixels.
+    const info = adapter.info
+    this._needsWriteTextureWorkaround = info?.vendor === 'img-tec' && info?.architecture === 'd-series'
     this.device = (await adapter.requestDevice()) as GPUDevice
 
     this.context = this.canvas.getContext('webgpu')!
@@ -1075,7 +1084,7 @@ export class WebGPURenderer {
 
   /** Get or create a texture bind group for a given NanoTexture. */
   private getTextureBindGroup(tex: NanoTexture): GPUBindGroup {
-    tex._ensureGPU(this.device)
+    tex._ensureGPU(this.device, this._needsWriteTextureWorkaround)
     const view = tex._gpuView ?? this.whiteTextureView
     let bg = this.textureBindGroups.get(view)
     if (!bg) {

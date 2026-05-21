@@ -35,7 +35,7 @@ export class NanoTexture {
     this._image = image
   }
 
-  _ensureGPU(device: GPUDevice) {
+  _ensureGPU(device: GPUDevice, useWriteTexture = false) {
     if (!this._dirty && this._device === device) return
     if (!this._image) return
     this._device = device
@@ -51,7 +51,30 @@ export class NanoTexture {
     })
     this._gpuView = this._gpuTexture.createView()
 
-    device.queue.copyExternalImageToTexture({ source: this._image }, { texture: this._gpuTexture }, [w, h])
+    if (useWriteTexture) {
+      // Pixel 10 (PowerVR img-tec / d-series): copyExternalImageToTexture
+      // silently produces an all-zero texture. Rasterise to a 2D canvas and
+      // upload raw RGBA bytes via writeTexture instead.
+      const canvas =
+        typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(w, h) : document.createElement('canvas')
+      if (!(canvas instanceof OffscreenCanvas)) {
+        canvas.width = w
+        canvas.height = h
+      }
+      const ctx = (canvas as HTMLCanvasElement | OffscreenCanvas).getContext('2d') as
+        | CanvasRenderingContext2D
+        | OffscreenCanvasRenderingContext2D
+        | null
+      if (ctx) {
+        ctx.drawImage(this._image as CanvasImageSource, 0, 0)
+        const pixels = ctx.getImageData(0, 0, w, h).data
+        device.queue.writeTexture({ texture: this._gpuTexture }, pixels, { bytesPerRow: w * 4 }, [w, h, 1])
+      } else {
+        device.queue.copyExternalImageToTexture({ source: this._image }, { texture: this._gpuTexture }, [w, h])
+      }
+    } else {
+      device.queue.copyExternalImageToTexture({ source: this._image }, { texture: this._gpuTexture }, [w, h])
+    }
     this._dirty = false
   }
 

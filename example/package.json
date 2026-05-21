@@ -11,6 +11,7 @@
     "typecheck": "tsgo"
   },
   "dependencies": {
+    "eruda": "3.4.3",
     "nanothree": "workspace:*",
     "react": "19.2.6",
     "react-dom": "19.2.6"
