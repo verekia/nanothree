@@ -167,9 +167,30 @@ const IndexPage = () => {
   const [bloom, setBloom] = useState(false)
   const bloomRef = useRef(false)
   bloomRef.current = bloom
-  const [toneMapping, setToneMapping] = useState<ToneMapping>(NoToneMapping)
-  const toneMappingRef = useRef<ToneMapping>(NoToneMapping)
+  const [toneMapping, setToneMapping] = useState<ToneMapping>(SoftToneMapping)
+  const toneMappingRef = useRef<ToneMapping>(SoftToneMapping)
   toneMappingRef.current = toneMapping
+  // Total scene light intensity (0.5..4). Split between ambient + directional
+  // by `lightRatio`: 0 = all ambient (flat), 1 = all directional (harsh).
+  const [lightIntensity, setLightIntensity] = useState(2)
+  const lightIntensityRef = useRef(2)
+  lightIntensityRef.current = lightIntensity
+  const [lightRatio, setLightRatio] = useState(0.5)
+  const lightRatioRef = useRef(0.5)
+  lightRatioRef.current = lightRatio
+  // Bloom params (only meaningful when bloom is enabled)
+  const [bloomStrength, setBloomStrength] = useState(0.5)
+  const bloomStrengthRef = useRef(0.5)
+  bloomStrengthRef.current = bloomStrength
+  const [bloomRadius, setBloomRadius] = useState(1.5)
+  const bloomRadiusRef = useRef(1.5)
+  bloomRadiusRef.current = bloomRadius
+  const [bloomThreshold, setBloomThreshold] = useState(2.1)
+  const bloomThresholdRef = useRef(2.1)
+  bloomThresholdRef.current = bloomThreshold
+  const [emissiveIntensity, setEmissiveIntensity] = useState(2.2)
+  const emissiveIntensityRef = useRef(2.2)
+  emissiveIntensityRef.current = emissiveIntensity
   const [fps, setFps] = useState(0)
   const [drawCalls, setDrawCalls] = useState(0)
   const [triangles, setTriangles] = useState(0)
@@ -236,16 +257,11 @@ const IndexPage = () => {
     let inited = false
     let frameCount = 0
     let fpsAccum = 0
-    let lastBloom: boolean | null = null
+    let lastEi = -1
 
     const animate = async () => {
       if (!inited) {
         await renderer.init()
-        // HDR bloom: lit Lambert surfaces top out near 1.0; emissive at
-        // intensity 4 sits at 4.0 in HDR. Threshold 1.0 lets only emissive
-        // pixels bloom — lit surfaces stay clean.
-        renderer.bloom.threshold = 1.0
-        renderer.bloom.strength = 0.8
         inited = true
       }
       raf = requestAnimationFrame(animate)
@@ -264,6 +280,11 @@ const IndexPage = () => {
       const s = shadowsRef.current
       renderer.shadowMap.enabled = s
       dirLight.castShadow = s
+      // Sync light intensity + ambient/directional ratio from refs
+      const totI = lightIntensityRef.current
+      const ratio = lightRatioRef.current
+      ambient.intensity = totI * (1 - ratio)
+      dirLight.intensity = totI * ratio
       for (const m of meshes) {
         m.rotation.y += dt * 1.5
         m.castShadow = s
@@ -272,12 +293,15 @@ const IndexPage = () => {
       const bloomOn = bloomRef.current
       renderer.bloom.enabled = bloomOn
       renderer.bloom.toneMapping = toneMappingRef.current
-      if (bloomOn !== lastBloom) {
-        // In HDR, intensity 4 pushes emissive well above the bloom threshold
-        // so emissive surfaces clearly bloom while lit Lambert stays clean.
-        const intensity = bloomOn ? 4 : 0
-        for (const m of emissiveMats) m.emissiveIntensity = intensity
-        lastBloom = bloomOn
+      renderer.bloom.strength = bloomStrengthRef.current
+      renderer.bloom.radius = bloomRadiusRef.current
+      renderer.bloom.threshold = bloomThresholdRef.current
+      // Drive emissive contribution from the slider when bloom is on; cut to
+      // zero when off so the scene shows pure Lambert color.
+      const ei = bloomOn ? emissiveIntensityRef.current : 0
+      if (ei !== lastEi) {
+        for (const m of emissiveMats) m.emissiveIntensity = ei
+        lastEi = ei
       }
 
       orbit.update()
@@ -331,7 +355,7 @@ const IndexPage = () => {
     ) => {
       if (node.isSkinnedMesh && node.material) {
         node.material.emissive = emissive
-        node.material.emissiveIntensity = bloomRef.current ? 4 : 0
+        node.material.emissiveIntensity = bloomRef.current ? emissiveIntensityRef.current : 0
         emissiveMats.push(node.material)
       }
       for (const child of node.children) applySkinnedEmissive(child as typeof node, emissive)
@@ -378,15 +402,11 @@ const IndexPage = () => {
     let inited = false
     let frameCount = 0
     let fpsAccum = 0
-    let lastBloom: boolean | null = null
+    let lastEi = -1
 
     const animate = async () => {
       if (!inited) {
         await renderer.init()
-        // HDR bloom: textured character pixels stay <=1; emissive at
-        // intensity 4 sits at ~4.0. Threshold 1.0 isolates emissive glow.
-        renderer.bloom.threshold = 1.0
-        renderer.bloom.strength = 0.8
         inited = true
       }
       raf = requestAnimationFrame(animate)
@@ -406,15 +426,23 @@ const IndexPage = () => {
       renderer.shadowMap.enabled = s
       dirLight.castShadow = s
       ground.receiveShadow = s
+      // Sync light intensity + ambient/directional ratio from refs
+      const totI = lightIntensityRef.current
+      const ratio = lightRatioRef.current
+      ambient.intensity = totI * (1 - ratio)
+      dirLight.intensity = totI * ratio
       const bloomOn = bloomRef.current
       renderer.bloom.enabled = bloomOn
       renderer.bloom.toneMapping = toneMappingRef.current
-      if (bloomOn !== lastBloom) {
-        // In HDR, intensity 4 pushes emissive well above the bloom threshold
-        // so emissive surfaces clearly bloom while lit Lambert stays clean.
-        const intensity = bloomOn ? 4 : 0
-        for (const m of emissiveMats) m.emissiveIntensity = intensity
-        lastBloom = bloomOn
+      renderer.bloom.strength = bloomStrengthRef.current
+      renderer.bloom.radius = bloomRadiusRef.current
+      renderer.bloom.threshold = bloomThresholdRef.current
+      // Drive emissive contribution from the slider when bloom is on; cut to
+      // zero when off so the scene shows pure Lambert color.
+      const ei = bloomOn ? emissiveIntensityRef.current : 0
+      if (ei !== lastEi) {
+        for (const m of emissiveMats) m.emissiveIntensity = ei
+        lastEi = ei
       }
       for (const m of skinnedMeshes) {
         m.castShadow = s
@@ -479,68 +507,148 @@ const IndexPage = () => {
       </div>
 
       {/* Top-right: controls */}
-      <div className="fixed top-4 right-4 flex items-center gap-3 font-mono text-sm">
-        <button
-          onClick={() => setDemo('static')}
-          className={`cursor-pointer rounded px-3 py-1.5 ${demo === 'static' ? 'bg-white text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
-        >
-          Static
-        </button>
-        <button
-          onClick={() => setDemo('skinned')}
-          className={`cursor-pointer rounded px-3 py-1.5 ${demo === 'skinned' ? 'bg-white text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
-        >
-          Skinned
-        </button>
-        {demo === 'static' && (
+      <div className="fixed top-4 right-4 flex flex-col items-end gap-2 font-mono text-sm">
+        <div className="flex items-center gap-3 text-white/70">
+          <label className="flex items-center gap-2">
+            <span>Intensity {lightIntensity.toFixed(2)}</span>
+            <input
+              type="range"
+              min={0.5}
+              max={4}
+              step={0.05}
+              value={lightIntensity}
+              onChange={e => setLightIntensity(Number(e.target.value))}
+              className="w-32 cursor-pointer"
+            />
+          </label>
+          <label className="flex items-center gap-2">
+            <span>Light ratio {lightRatio.toFixed(2)}</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={lightRatio}
+              onChange={e => setLightRatio(Number(e.target.value))}
+              className="w-32 cursor-pointer"
+            />
+          </label>
+        </div>
+        {bloom && (
+          <div className="flex items-center gap-3 text-white/70">
+            <label className="flex items-center gap-2">
+              <span>Strength {bloomStrength.toFixed(2)}</span>
+              <input
+                type="range"
+                min={0}
+                max={3}
+                step={0.05}
+                value={bloomStrength}
+                onChange={e => setBloomStrength(Number(e.target.value))}
+                className="w-24 cursor-pointer"
+              />
+            </label>
+            <label className="flex items-center gap-2">
+              <span>Radius {bloomRadius.toFixed(2)}</span>
+              <input
+                type="range"
+                min={0}
+                max={2}
+                step={0.05}
+                value={bloomRadius}
+                onChange={e => setBloomRadius(Number(e.target.value))}
+                className="w-24 cursor-pointer"
+              />
+            </label>
+            <label className="flex items-center gap-2">
+              <span>Threshold {bloomThreshold.toFixed(2)}</span>
+              <input
+                type="range"
+                min={0}
+                max={3}
+                step={0.05}
+                value={bloomThreshold}
+                onChange={e => setBloomThreshold(Number(e.target.value))}
+                className="w-24 cursor-pointer"
+              />
+            </label>
+            <label className="flex items-center gap-2">
+              <span>Emissive {emissiveIntensity.toFixed(2)}</span>
+              <input
+                type="range"
+                min={0}
+                max={10}
+                step={0.1}
+                value={emissiveIntensity}
+                onChange={e => setEmissiveIntensity(Number(e.target.value))}
+                className="w-24 cursor-pointer"
+              />
+            </label>
+          </div>
+        )}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setDemo('static')}
+            className={`cursor-pointer rounded px-3 py-1.5 ${demo === 'static' ? 'bg-white text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
+          >
+            Static
+          </button>
+          <button
+            onClick={() => setDemo('skinned')}
+            className={`cursor-pointer rounded px-3 py-1.5 ${demo === 'skinned' ? 'bg-white text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
+          >
+            Skinned
+          </button>
+          {demo === 'static' && (
+            <select
+              value={staticCaseIndex}
+              onChange={e => setStaticCaseIndex(Number(e.target.value))}
+              className="cursor-pointer rounded bg-white/10 px-3 py-1.5 text-white/80 hover:bg-white/20"
+            >
+              {STATIC_CASES.map((c, i) => (
+                <option key={c.label} value={i}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          )}
+          {demo === 'skinned' && (
+            <select
+              value={skinnedCount}
+              onChange={e => setSkinnedCount(Number(e.target.value))}
+              className="cursor-pointer rounded bg-white/10 px-3 py-1.5 text-white/80 hover:bg-white/20"
+            >
+              {SKINNED_COUNTS.map(c => (
+                <option key={c} value={c}>
+                  {c.toLocaleString()} characters
+                </option>
+              ))}
+            </select>
+          )}
+          <button
+            onClick={() => setShadows(s => !s)}
+            className={`cursor-pointer rounded px-3 py-1.5 ${shadows ? 'bg-amber-500 text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
+          >
+            Shadows {shadows ? 'ON' : 'OFF'}
+          </button>
+          <button
+            onClick={() => setBloom(b => !b)}
+            className={`cursor-pointer rounded px-3 py-1.5 ${bloom ? 'bg-fuchsia-500 text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
+          >
+            Bloom {bloom ? 'ON' : 'OFF'}
+          </button>
           <select
-            value={staticCaseIndex}
-            onChange={e => setStaticCaseIndex(Number(e.target.value))}
+            value={toneMapping}
+            onChange={e => setToneMapping(Number(e.target.value) as ToneMapping)}
             className="cursor-pointer rounded bg-white/10 px-3 py-1.5 text-white/80 hover:bg-white/20"
           >
-            {STATIC_CASES.map((c, i) => (
-              <option key={c.label} value={i}>
-                {c.label}
+            {TONEMAP_OPTIONS.map(o => (
+              <option key={o.value} value={o.value}>
+                Tonemap: {o.label}
               </option>
             ))}
           </select>
-        )}
-        {demo === 'skinned' && (
-          <select
-            value={skinnedCount}
-            onChange={e => setSkinnedCount(Number(e.target.value))}
-            className="cursor-pointer rounded bg-white/10 px-3 py-1.5 text-white/80 hover:bg-white/20"
-          >
-            {SKINNED_COUNTS.map(c => (
-              <option key={c} value={c}>
-                {c.toLocaleString()} characters
-              </option>
-            ))}
-          </select>
-        )}
-        <button
-          onClick={() => setShadows(s => !s)}
-          className={`cursor-pointer rounded px-3 py-1.5 ${shadows ? 'bg-amber-500 text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
-        >
-          Shadows {shadows ? 'ON' : 'OFF'}
-        </button>
-        <button
-          onClick={() => setBloom(b => !b)}
-          className={`cursor-pointer rounded px-3 py-1.5 ${bloom ? 'bg-fuchsia-500 text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
-        >
-          Bloom {bloom ? 'ON' : 'OFF'}
-        </button>
-        <select
-          value={toneMapping}
-          onChange={e => setToneMapping(Number(e.target.value) as ToneMapping)}
-          className="cursor-pointer rounded bg-white/10 px-3 py-1.5 text-white/80 hover:bg-white/20"
-        >
-          {TONEMAP_OPTIONS.map(o => (
-            <option key={o.value} value={o.value}>
-              Tonemap: {o.label}
-            </option>
-          ))}
-        </select>
+        </div>
       </div>
     </div>
   )

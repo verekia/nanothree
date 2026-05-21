@@ -218,6 +218,13 @@ export class BloomPass {
    */
   threshold = 1.0
   /**
+   * Multiplier on each upsample step's contribution. Higher values give
+   * a wider, softer halo (lower-resolution mips bleed up more strongly);
+   * lower values give a tighter, sharper halo (small mips contribute less).
+   * Implemented as a per-pass `blendConstant` on the additive upsample.
+   */
+  radius = 1.0
+  /**
    * Tone-mapping applied at the composite step. `NoToneMapping` (default)
    * hard-clamps each channel to [0,1] — preserves the punchy LDR look but
    * loses highlight detail above 1. `ACESFilmicToneMapping` applies a soft
@@ -324,9 +331,11 @@ export class BloomPass {
         targets: [
           {
             format: sceneFormat,
+            // src factor is `constant` so the per-pass blendConstant scales
+            // the upsample contribution. This is how `radius` is implemented.
             blend: {
-              color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-              alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+              color: { srcFactor: 'constant', dstFactor: 'one', operation: 'add' },
+              alpha: { srcFactor: 'constant', dstFactor: 'one', operation: 'add' },
             },
           },
         ],
@@ -451,14 +460,17 @@ export class BloomPass {
     }
 
     // Additive upsample: mip[src] blurred and added into mip[src-1]. The
-    // existing downsampled value at mip[src-1] is preserved via loadOp:'load'
-    // and the upsample pipeline blends src*1 + dst*1.
+    // existing downsampled value at mip[src-1] is preserved via loadOp:'load',
+    // and the upsample pipeline blends `src * blendConstant + dst * 1`. The
+    // blendConstant is `radius`, so a smaller value tightens the halo and a
+    // larger value spreads it.
     for (let step = 0; step < BLOOM_MIPS - 1; step++) {
       const dst = BLOOM_MIPS - 2 - step
       const pass = encoder.beginRenderPass({
         colorAttachments: [{ view: this.mipViews[dst], loadOp: 'load', storeOp: 'store' }],
       })
       pass.setPipeline(this.upsamplePipeline)
+      pass.setBlendConstant({ r: this.radius, g: this.radius, b: this.radius, a: 1 })
       pass.setBindGroup(0, this.upsampleBindGroups[step])
       pass.draw(3)
       pass.end()
