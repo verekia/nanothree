@@ -14,6 +14,7 @@ import { BackSide, DoubleSide, MeshBasicMaterial, type NanoTexture } from './mat
 import { mat4Ortho, mat4LookAt, mat4Multiply } from './math'
 import { ShaderMaterial } from './shader-material'
 import { AdditiveBlending } from './sprite'
+import { NoToneMapping, ToneMappingPass, type ToneMapping } from './tonemap'
 
 import type { PerspectiveCamera } from './core'
 import type { BufferGeometry } from './geometry'
@@ -86,7 +87,7 @@ struct VSOut {
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let n = normalize(in.normal);
-  let light = max(dot(n, scene.lightDir.xyz), 0.0);
+  let light = dot(n, scene.lightDir.xyz) * 0.5 + 0.5;
 
   var shadow = 1.0;
   if (scene.shadowParams.x > 0.0) {
@@ -155,7 +156,7 @@ struct VSOut {
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let n = normalize(in.normal);
-  let light = max(dot(n, scene.lightDir.xyz), 0.0);
+  let light = dot(n, scene.lightDir.xyz) * 0.5 + 0.5;
 
   var shadow = 1.0;
   if (scene.shadowParams.x > 0.0) {
@@ -265,7 +266,7 @@ struct VSOut {
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let n = normalize(in.normal);
-  let light = max(dot(n, scene.lightDir.xyz), 0.0);
+  let light = dot(n, scene.lightDir.xyz) * 0.5 + 0.5;
 
   var shadow = 1.0;
   if (scene.shadowParams.x > 0.0) {
@@ -411,7 +412,7 @@ struct VSOut {
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let n = normalize(in.normal);
-  let light = max(dot(n, scene.lightDir.xyz), 0.0);
+  let light = dot(n, scene.lightDir.xyz) * 0.5 + 0.5;
 
   var shadow = 1.0;
   if (scene.shadowParams.x > 0.0) {
@@ -560,7 +561,7 @@ struct VSOut {
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let n = normalize(in.normal);
-  let light = max(dot(n, scene.lightDir.xyz), 0.0);
+  let light = dot(n, scene.lightDir.xyz) * 0.5 + 0.5;
 
   var shadow = 1.0;
   if (scene.shadowParams.x > 0.0) {
@@ -642,7 +643,7 @@ struct VSOut {
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let n = normalize(in.normal);
-  let light = max(dot(n, scene.lightDir.xyz), 0.0);
+  let light = dot(n, scene.lightDir.xyz) * 0.5 + 0.5;
 
   var shadow = 1.0;
   if (scene.shadowParams.x > 0.0) {
@@ -699,10 +700,11 @@ const INITIAL_CAPACITY = 1024
 const SHADOW_MAP_SIZE = 2048
 const SHADOW_BIAS = 0.003
 
-// When bloom is enabled, the scene is rendered into an HDR offscreen target
-// so emissive can exceed 1.0 and the bloom pass can find true bright spots.
-// The composite pass tone-maps HDR -> canvas LDR. When bloom is disabled,
-// the renderer uses canvas LDR pipelines and writes straight to the canvas.
+// When either bloom or tone mapping is active, the scene is rendered into an
+// HDR offscreen target so emissive can exceed 1.0 and post-process passes can
+// see uncompressed values. ToneMappingPass owns that target and does the final
+// HDR -> LDR composite. When both are disabled, the renderer uses canvas LDR
+// pipelines and writes straight to the canvas — the zero post-process fast path.
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float'
 
 // viewProj(16) + lightDir(4) + ambient(4) + lightColor(4) + lightViewProj(16) + shadowParams(4)
@@ -895,10 +897,22 @@ export class WebGPURenderer {
   /** Optional post-process bloom. Toggle with `renderer.bloom.enabled = true`. */
   bloom = new BloomPass()
 
+  /** HDR scene target + final composite. Owns the HDR texture used by bloom. */
+  private toneMappingPass = new ToneMappingPass()
+
+  /**
+   * Tone-mapping curve applied at the final composite. `NoToneMapping`
+   * (default) renders straight to the canvas in LDR — the fast path for
+   * weak devices. Any other value switches the scene to an HDR target and
+   * runs the composite pass to map back down.
+   */
+  toneMapping: ToneMapping = NoToneMapping
+
   /**
    * Format that built-in color-writing pipelines were last compiled against.
-   * Driven by `bloom.enabled`: LDR canvas format when bloom is off, HDR when
-   * on. Tracked so we only recompile pipelines when the format changes.
+   * Driven by whether any post-process is active (bloom or tone mapping):
+   * LDR canvas format when neither is on, HDR when either is. Tracked so we
+   * only recompile pipelines when the format changes.
    */
   private _pipelineFormat!: GPUTextureFormat
 
@@ -992,7 +1006,8 @@ export class WebGPURenderer {
     this.createBuffers(INITIAL_CAPACITY)
     this.createBindGroups()
     this.ensureDepthTexture()
-    this.bloom.init(this.device, HDR_FORMAT, this.format)
+    this.bloom.init(this.device, HDR_FORMAT)
+    this.toneMappingPass.init(this.device, HDR_FORMAT, this.format)
   }
 
   private createBindGroupLayouts() {
@@ -1418,12 +1433,13 @@ struct ObjectData { model: mat4x4f, color: vec4f }
 
   /**
    * Recompile all color-writing pipelines for a different scene-color format,
-   * if needed. Cheap when bloom state doesn't change; on toggle, recompiles
+   * if needed. Cheap in steady state; on a post-process toggle, recompiles
    * ~30 pipelines and clears the custom-shader cache (those rebuild lazily).
    * Called once per `render()` before any draws are encoded.
    */
   private _ensurePipelines() {
-    const want: GPUTextureFormat = this.bloom.enabled ? HDR_FORMAT : this.format
+    const usePost = this.bloom.enabled || this.toneMapping !== NoToneMapping
+    const want: GPUTextureFormat = usePost ? HDR_FORMAT : this.format
     if (this._pipelineFormat === want) return
     this._pipelineFormat = want
     this.createBuiltinPipelines(want)
@@ -2053,10 +2069,10 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     }
 
     // ── Main color pass ─────────────────────────────────────────
-    const useBloom = this.bloom.enabled
-    if (useBloom) this.bloom.resize(this.canvas.width, this.canvas.height)
+    const usePostProcess = this.bloom.enabled || this.toneMapping !== NoToneMapping
+    if (usePostProcess) this.toneMappingPass.resize(this.canvas.width, this.canvas.height)
     const canvasTexture = this.context.getCurrentTexture()
-    this.colorAtt.view = useBloom ? this.bloom.sceneView! : canvasTexture.createView()
+    this.colorAtt.view = usePostProcess ? this.toneMappingPass.sceneView! : canvasTexture.createView()
     this.depthAtt.view = this.depthView
     const pass = encoder.beginRenderPass(this.passDesc)
     pass.setBindGroup(0, this.sceneBindGroup)
@@ -2496,7 +2512,19 @@ struct ObjectData { model: mat4x4f, color: vec4f }
 
     pass.end()
 
-    if (useBloom) this.bloom.encode(encoder, canvasTexture.createView())
+    if (usePostProcess) {
+      if (this.bloom.enabled) {
+        this.bloom.resize(this.canvas.width, this.canvas.height, this.toneMappingPass.sceneView!)
+        this.bloom.encode(encoder)
+      }
+      this.toneMappingPass.encode(
+        encoder,
+        canvasTexture.createView(),
+        this.bloom.enabled ? this.bloom.outputView : null,
+        this.bloom.strength,
+        this.toneMapping,
+      )
+    }
 
     this.device.queue.submit([encoder.finish()])
   }
@@ -2509,6 +2537,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     this.shadowLightBuffer?.destroy()
     this.whiteTexture?.destroy()
     this.bloom.dispose()
+    this.toneMappingPass.dispose()
     this.customPipelineCache.clear()
     this.textureBindGroups.clear()
     this.device?.destroy()

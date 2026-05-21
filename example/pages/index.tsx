@@ -170,16 +170,16 @@ const IndexPage = () => {
   const [p3, setP3] = useState(false)
   const p3Ref = useRef(false)
   p3Ref.current = p3
-  const [toneMapping, setToneMapping] = useState<ToneMapping>(SoftToneMapping)
-  const toneMappingRef = useRef<ToneMapping>(SoftToneMapping)
+  const [toneMapping, setToneMapping] = useState<ToneMapping>(NoToneMapping)
+  const toneMappingRef = useRef<ToneMapping>(NoToneMapping)
   toneMappingRef.current = toneMapping
   // Total scene light intensity (0.5..4). Split between ambient + directional
   // by `lightRatio`: 0 = all ambient (flat), 1 = all directional (harsh).
-  const [lightIntensity, setLightIntensity] = useState(2)
-  const lightIntensityRef = useRef(2)
+  const [lightIntensity, setLightIntensity] = useState(1.5)
+  const lightIntensityRef = useRef(1.5)
   lightIntensityRef.current = lightIntensity
-  const [lightRatio, setLightRatio] = useState(0.5)
-  const lightRatioRef = useRef(0.5)
+  const [lightRatio, setLightRatio] = useState(0.65)
+  const lightRatioRef = useRef(0.65)
   lightRatioRef.current = lightRatio
   // Bloom params (only meaningful when bloom is enabled)
   const [bloomStrength, setBloomStrength] = useState(0.5)
@@ -295,7 +295,7 @@ const IndexPage = () => {
       }
       const bloomOn = bloomRef.current
       renderer.bloom.enabled = bloomOn
-      renderer.bloom.toneMapping = toneMappingRef.current
+      renderer.toneMapping = toneMappingRef.current
       renderer.bloom.strength = bloomStrengthRef.current
       renderer.bloom.radius = bloomRadiusRef.current
       renderer.bloom.threshold = bloomThresholdRef.current
@@ -437,7 +437,7 @@ const IndexPage = () => {
       dirLight.intensity = totI * ratio
       const bloomOn = bloomRef.current
       renderer.bloom.enabled = bloomOn
-      renderer.bloom.toneMapping = toneMappingRef.current
+      renderer.toneMapping = toneMappingRef.current
       renderer.bloom.strength = bloomStrengthRef.current
       renderer.bloom.radius = bloomRadiusRef.current
       renderer.bloom.threshold = bloomThresholdRef.current
