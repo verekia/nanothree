@@ -150,6 +150,30 @@ export function mat4ComposeTRS(
   sy: number,
   sz: number,
 ) {
+  // Fast path: pure Y-axis rotation (rx === 0 && rz === 0). Avoids 4 trig
+  // calls and most of the matrix-product math. Very common in practice —
+  // characters/props spinning around the world up axis, billboards, turrets.
+  if (rx === 0 && rz === 0) {
+    const cy = Math.cos(ry)
+    const sy2 = Math.sin(ry)
+    out[0] = cy * sx
+    out[1] = 0
+    out[2] = -sy2 * sx
+    out[3] = 0
+    out[4] = 0
+    out[5] = sy
+    out[6] = 0
+    out[7] = 0
+    out[8] = sy2 * sz
+    out[9] = 0
+    out[10] = cy * sz
+    out[11] = 0
+    out[12] = px
+    out[13] = py
+    out[14] = pz
+    out[15] = 1
+    return
+  }
   const cx = Math.cos(rx),
     snx = Math.sin(rx)
   const cy = Math.cos(ry),

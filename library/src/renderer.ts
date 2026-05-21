@@ -860,6 +860,21 @@ export class WebGPURenderer {
   private objectStaging!: Float32Array
   private capacity = INITIAL_CAPACITY
 
+  // Per-frame bucket lists — held on the instance and reset to length 0 each
+  // frame so render() does not allocate fresh arrays + regrow them every tick.
+  private _solidMeshes: Mesh[] = []
+  private _texturedMeshes: Mesh[] = []
+  private _vertexColorMeshes: Mesh[] = []
+  private _vertexColorBasicMeshes: Mesh[] = []
+  private _basicMeshes: Mesh[] = []
+  private _wireframeMeshes: Mesh[] = []
+  private _customMeshes: Mesh[] = []
+  private _lineList: Line[] = []
+  private _skinnedSolid: SkinnedMesh[] = []
+  private _skinnedTextured: SkinnedMesh[] = []
+  private _normalSprites: Sprite[] = []
+  private _additiveSprites: Sprite[] = []
+
   // Render pass descriptors (reused every frame)
   private colorAtt: GPURenderPassColorAttachment
   private depthAtt: GPURenderPassDepthStencilAttachment
@@ -1440,14 +1455,22 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     // Single-pass traversal: compute world matrices + collect renderables + frustum cull
     scene.updateMatrixWorld(camera.viewProjection)
 
-    const solidMeshes: Mesh[] = []
-    const texturedMeshes: Mesh[] = []
-    const vertexColorMeshes: Mesh[] = []
-    const vertexColorBasicMeshes: Mesh[] = []
-    const basicMeshes: Mesh[] = []
-    const wireframeMeshes: Mesh[] = []
-    const customMeshes: Mesh[] = []
-    const lines: Line[] = []
+    const solidMeshes = this._solidMeshes
+    const texturedMeshes = this._texturedMeshes
+    const vertexColorMeshes = this._vertexColorMeshes
+    const vertexColorBasicMeshes = this._vertexColorBasicMeshes
+    const basicMeshes = this._basicMeshes
+    const wireframeMeshes = this._wireframeMeshes
+    const customMeshes = this._customMeshes
+    const lines = this._lineList
+    solidMeshes.length = 0
+    texturedMeshes.length = 0
+    vertexColorMeshes.length = 0
+    vertexColorBasicMeshes.length = 0
+    basicMeshes.length = 0
+    wireframeMeshes.length = 0
+    customMeshes.length = 0
+    lines.length = 0
 
     // Use tag flags (isShaderMaterial / isBasic) instead of instanceof — for
     // 20k+ meshes per frame, instanceof's prototype-chain walk shows up in
@@ -1474,8 +1497,10 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     for (let i = 0; i < scene.lines.length; i++) lines.push(scene.lines[i])
 
     // Classify skinned meshes (solid vs textured)
-    const skinnedSolid: SkinnedMesh[] = []
-    const skinnedTextured: SkinnedMesh[] = []
+    const skinnedSolid = this._skinnedSolid
+    const skinnedTextured = this._skinnedTextured
+    skinnedSolid.length = 0
+    skinnedTextured.length = 0
     for (let i = 0; i < scene.skinnedMeshes.length; i++) {
       const sm = scene.skinnedMeshes[i]
       if ((sm.material as MeshLambertMaterial).hasTexture) skinnedTextured.push(sm)
@@ -1483,8 +1508,10 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     }
 
     // Split transparent sprites by blending mode (opaque sprites are ignored for now)
-    const normalSprites: Sprite[] = []
-    const additiveSprites: Sprite[] = []
+    const normalSprites = this._normalSprites
+    const additiveSprites = this._additiveSprites
+    normalSprites.length = 0
+    additiveSprites.length = 0
     for (let i = 0; i < scene.sprites.length; i++) {
       const s = scene.sprites[i]
       if (!s.material.transparent) continue
@@ -1628,8 +1655,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
       this.writeObjectData(idx, l._worldMatrix, l.material.color.r, l.material.color.g, l.material.color.b)
     }
     // Stage sprite data with billboard matrices
-    const spriteList = normalSprites.concat(additiveSprites)
-    if (spriteList.length > 0) {
+    if (normalSpriteCount + additiveSpriteCount > 0) {
       // Camera right/up/forward from camera world matrix (column-major)
       const cm = camera._worldMatrix
       const crx = cm[0],
@@ -1641,39 +1667,43 @@ struct ObjectData { model: mat4x4f, color: vec4f }
       const cfx = cm[8],
         cfy = cm[9],
         cfz = cm[10] // forward
+      const stage = this.objectStaging
+      const floatStride = this.objectFloatStride
 
-      for (let i = 0; i < spriteList.length; i++, idx++) {
-        const s = spriteList[i]
-        const m = s._worldMatrix
-        // Extract world position
-        const px = m[12],
-          py = m[13],
-          pz = m[14]
-        // Extract uniform scale (length of first column)
-        const sx = Math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
-        const sy = Math.sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6])
-        // Build billboard matrix (column-major)
-        const off = idx * this.objectFloatStride
-        this.objectStaging[off] = crx * sx
-        this.objectStaging[off + 1] = cry * sx
-        this.objectStaging[off + 2] = crz * sx
-        this.objectStaging[off + 3] = 0
-        this.objectStaging[off + 4] = cux * sy
-        this.objectStaging[off + 5] = cuy * sy
-        this.objectStaging[off + 6] = cuz * sy
-        this.objectStaging[off + 7] = 0
-        this.objectStaging[off + 8] = cfx
-        this.objectStaging[off + 9] = cfy
-        this.objectStaging[off + 10] = cfz
-        this.objectStaging[off + 11] = 0
-        this.objectStaging[off + 12] = px
-        this.objectStaging[off + 13] = py
-        this.objectStaging[off + 14] = pz
-        this.objectStaging[off + 15] = 1
-        this.objectStaging[off + 16] = s.material.color.r
-        this.objectStaging[off + 17] = s.material.color.g
-        this.objectStaging[off + 18] = s.material.color.b
-        this.objectStaging[off + 19] = s.material.opacity
+      // Iterate normal then additive sprites without merging the two arrays
+      for (let pass = 0; pass < 2; pass++) {
+        const list = pass === 0 ? normalSprites : additiveSprites
+        const len = pass === 0 ? normalSpriteCount : additiveSpriteCount
+        for (let i = 0; i < len; i++, idx++) {
+          const s = list[i]
+          const m = s._worldMatrix
+          const px = m[12],
+            py = m[13],
+            pz = m[14]
+          const sx = Math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
+          const sy = Math.sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6])
+          const off = idx * floatStride
+          stage[off] = crx * sx
+          stage[off + 1] = cry * sx
+          stage[off + 2] = crz * sx
+          stage[off + 3] = 0
+          stage[off + 4] = cux * sy
+          stage[off + 5] = cuy * sy
+          stage[off + 6] = cuz * sy
+          stage[off + 7] = 0
+          stage[off + 8] = cfx
+          stage[off + 9] = cfy
+          stage[off + 10] = cfz
+          stage[off + 11] = 0
+          stage[off + 12] = px
+          stage[off + 13] = py
+          stage[off + 14] = pz
+          stage[off + 15] = 1
+          stage[off + 16] = s.material.color.r
+          stage[off + 17] = s.material.color.g
+          stage[off + 18] = s.material.color.b
+          stage[off + 19] = s.material.opacity
+        }
       }
     }
     // Stage instanced sprite world matrices (one slot per InstancedSprite)
@@ -1695,9 +1725,13 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     for (let i = 0; i < instancedSpriteCount; i++) instancedSprites[i]._ensureGPU(this.device, this.instanceLayout)
 
     // Update skinned mesh bone matrices and GPU buffers
-    const allSkinned = skinnedSolid.concat(skinnedTextured)
-    for (let i = 0; i < allSkinned.length; i++) {
-      const sm = allSkinned[i]
+    for (let i = 0; i < skinnedSolidCount; i++) {
+      const sm = skinnedSolid[i]
+      sm._updateBoneMatrices()
+      sm._ensureBoneGPU(this.device, this.instanceLayout)
+    }
+    for (let i = 0; i < skinnedTexturedCount; i++) {
+      const sm = skinnedTextured[i]
       sm._updateBoneMatrices()
       sm._ensureBoneGPU(this.device, this.instanceLayout)
     }
@@ -1705,6 +1739,8 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     const encoder = this.device.createCommandEncoder()
 
     // ── Shadow depth pass ───────────────────────────────────────
+    const objStride = this.objectStride
+    const objBindGroup = this.objectBindGroup
     if (shadowsOn) {
       this.device.queue.writeBuffer(this.shadowLightBuffer, 0, this.lightVP as unknown as ArrayBuffer)
       const sp = encoder.beginRenderPass(this.shadowPassDesc)
@@ -1713,15 +1749,16 @@ struct ObjectData { model: mat4x4f, color: vec4f }
 
       let curGeo: BufferGeometry | null = null
       for (let i = 0; i < solidCount; i++) {
-        if (!solidMeshes[i].castShadow) continue
-        const geo = solidMeshes[i].geometry
+        const m = solidMeshes[i]
+        if (!m.castShadow) continue
+        const geo = m.geometry
         if (geo !== curGeo) {
           curGeo = geo
           geo._ensureGPU(this.device)
           sp.setVertexBuffer(0, geo._vertexBuffer!)
           sp.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
-        sp.setBindGroup(1, this.objectBindGroup, [i * this.objectStride])
+        sp.setBindGroup(1, objBindGroup, [i * objStride])
         sp.drawIndexed(geo._indexCount)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
@@ -1729,15 +1766,16 @@ struct ObjectData { model: mat4x4f, color: vec4f }
 
       // Textured mesh shadows (same shadow pipeline — depth-only, no textures needed)
       for (let i = 0; i < texturedCount; i++) {
-        if (!texturedMeshes[i].castShadow) continue
-        const geo = texturedMeshes[i].geometry
+        const m = texturedMeshes[i]
+        if (!m.castShadow) continue
+        const geo = m.geometry
         if (geo !== curGeo) {
           curGeo = geo
           geo._ensureGPU(this.device)
           sp.setVertexBuffer(0, geo._vertexBuffer!)
           sp.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
-        sp.setBindGroup(1, this.objectBindGroup, [(solidCount + i) * this.objectStride])
+        sp.setBindGroup(1, objBindGroup, [(solidCount + i) * objStride])
         sp.drawIndexed(geo._indexCount)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
@@ -1758,7 +1796,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
             sp.setVertexBuffer(0, geo._vertexBuffer!)
             sp.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
           }
-          sp.setBindGroup(1, this.objectBindGroup, [(skBase + i) * this.objectStride])
+          sp.setBindGroup(1, objBindGroup, [(skBase + i) * objStride])
           sp.setBindGroup(2, sm._boneBindGroup!)
           sp.drawIndexed(geo._indexCount)
           this.info.drawCalls++
@@ -1774,29 +1812,31 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         curGeo = null
         const vcBase = solidCount + texturedCount + skinnedSolidCount + skinnedTexturedCount
         for (let i = 0; i < vcCount; i++) {
-          if (!vertexColorMeshes[i].castShadow) continue
-          const geo = vertexColorMeshes[i].geometry
+          const m = vertexColorMeshes[i]
+          if (!m.castShadow) continue
+          const geo = m.geometry
           if (geo !== curGeo) {
             curGeo = geo
             geo._ensureGPU(this.device)
             sp.setVertexBuffer(0, geo._vertexBuffer!)
             sp.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
           }
-          sp.setBindGroup(1, this.objectBindGroup, [(vcBase + i) * this.objectStride])
+          sp.setBindGroup(1, objBindGroup, [(vcBase + i) * objStride])
           sp.drawIndexed(geo._indexCount)
           this.info.drawCalls++
           this.info.triangles += (geo._indexCount / 3) | 0
         }
         for (let i = 0; i < vcBasicCount; i++) {
-          if (!vertexColorBasicMeshes[i].castShadow) continue
-          const geo = vertexColorBasicMeshes[i].geometry
+          const m = vertexColorBasicMeshes[i]
+          if (!m.castShadow) continue
+          const geo = m.geometry
           if (geo !== curGeo) {
             curGeo = geo
             geo._ensureGPU(this.device)
             sp.setVertexBuffer(0, geo._vertexBuffer!)
             sp.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
           }
-          sp.setBindGroup(1, this.objectBindGroup, [(vcBase + vcCount + i) * this.objectStride])
+          sp.setBindGroup(1, objBindGroup, [(vcBase + vcCount + i) * objStride])
           sp.drawIndexed(geo._indexCount)
           this.info.drawCalls++
           this.info.triangles += (geo._indexCount / 3) | 0
@@ -1819,7 +1859,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
             sp.setVertexBuffer(0, geo._vertexBuffer!)
             sp.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
           }
-          sp.setBindGroup(1, this.objectBindGroup, [(instBase + i) * this.objectStride])
+          sp.setBindGroup(1, objBindGroup, [(instBase + i) * objStride])
           sp.setBindGroup(2, im._instanceBindGroup!)
           sp.drawIndexed(geo._indexCount, im.count)
           this.info.drawCalls++
@@ -1848,7 +1888,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           sp.setVertexBuffer(0, geo._vertexBuffer!)
           sp.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
-        sp.setBindGroup(1, this.objectBindGroup, [(customBase + i) * this.objectStride])
+        sp.setBindGroup(1, objBindGroup, [(customBase + i) * objStride])
         sp.drawIndexed(geo._indexCount)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
@@ -1867,7 +1907,8 @@ struct ObjectData { model: mat4x4f, color: vec4f }
       let curPipeline: GPURenderPipeline | null = null
       let curGeo: BufferGeometry | null = null
       for (let i = 0; i < solidCount; i++) {
-        const mat = solidMeshes[i].material as MeshLambertMaterial
+        const m = solidMeshes[i]
+        const mat = m.material as MeshLambertMaterial
         const pipeline =
           mat.side === BackSide
             ? this.meshPipelineFront
@@ -1879,14 +1920,14 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setPipeline(pipeline)
           curGeo = null
         }
-        const geo = solidMeshes[i].geometry
+        const geo = m.geometry
         if (geo !== curGeo) {
           curGeo = geo
           geo._ensureGPU(this.device)
           pass.setVertexBuffer(0, geo._vertexBuffer!)
           pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
-        pass.setBindGroup(1, this.objectBindGroup, [i * this.objectStride])
+        pass.setBindGroup(1, objBindGroup, [i * objStride])
         pass.drawIndexed(geo._indexCount)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
@@ -1899,7 +1940,8 @@ struct ObjectData { model: mat4x4f, color: vec4f }
       let curGeo: BufferGeometry | null = null
       const base = solidCount
       for (let i = 0; i < texturedCount; i++) {
-        const mat = texturedMeshes[i].material as MeshLambertMaterial
+        const m = texturedMeshes[i]
+        const mat = m.material as MeshLambertMaterial
         const pipeline =
           mat.side === BackSide
             ? this.texturedMeshPipelineFront
@@ -1911,14 +1953,14 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setPipeline(pipeline)
           curGeo = null
         }
-        const geo = texturedMeshes[i].geometry
+        const geo = m.geometry
         if (geo !== curGeo) {
           curGeo = geo
           geo._ensureGPU(this.device)
           pass.setVertexBuffer(0, geo._vertexBuffer!)
           pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
-        pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
+        pass.setBindGroup(1, objBindGroup, [(base + i) * objStride])
         pass.setBindGroup(2, this.getTextureBindGroup(mat.map!))
         pass.drawIndexed(geo._indexCount)
         this.info.drawCalls++
@@ -1952,7 +1994,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setVertexBuffer(0, geo._vertexBuffer!)
           pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
-        pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
+        pass.setBindGroup(1, objBindGroup, [(base + i) * objStride])
         pass.setBindGroup(2, sm._boneBindGroup!)
         pass.drawIndexed(geo._indexCount)
         this.info.drawCalls++
@@ -1986,7 +2028,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setVertexBuffer(0, geo._vertexBuffer!)
           pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
-        pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
+        pass.setBindGroup(1, objBindGroup, [(base + i) * objStride])
         pass.setBindGroup(2, sm._boneBindGroup!)
         pass.setBindGroup(3, this.getTextureBindGroup(mat.map!))
         pass.drawIndexed(geo._indexCount)
@@ -2020,7 +2062,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setVertexBuffer(0, geo._vertexBuffer!)
           pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
-        pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
+        pass.setBindGroup(1, objBindGroup, [(base + i) * objStride])
         pass.drawIndexed(geo._indexCount)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
@@ -2052,7 +2094,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setVertexBuffer(0, geo._vertexBuffer!)
           pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
-        pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
+        pass.setBindGroup(1, objBindGroup, [(base + i) * objStride])
         pass.drawIndexed(geo._indexCount)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
@@ -2076,7 +2118,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         geo._ensureGPU(this.device)
         pass.setVertexBuffer(0, geo._vertexBuffer!)
         pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
-        pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
+        pass.setBindGroup(1, objBindGroup, [(base + i) * objStride])
         pass.setBindGroup(2, im._instanceBindGroup!)
         pass.drawIndexed(geo._indexCount, im.count)
         this.info.drawCalls++
@@ -2110,7 +2152,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setVertexBuffer(0, geo._vertexBuffer!)
           pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
         }
-        pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
+        pass.setBindGroup(1, objBindGroup, [(base + i) * objStride])
         pass.drawIndexed(geo._indexCount)
         this.info.drawCalls++
         this.info.triangles += (geo._indexCount / 3) | 0
@@ -2138,7 +2180,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setVertexBuffer(0, geo._vertexBuffer!)
           pass.setIndexBuffer(geo._wireframeIndexBuffer!, geo._wireframeIndexFormat)
         }
-        pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
+        pass.setBindGroup(1, objBindGroup, [(base + i) * objStride])
         pass.drawIndexed(geo._wireframeIndexCount)
         this.info.drawCalls++
       }
@@ -2180,7 +2222,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
             pass.setIndexBuffer(geo._indexBuffer!, geo._indexFormat)
           }
         }
-        pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
+        pass.setBindGroup(1, objBindGroup, [(base + i) * objStride])
         if (mat._uniformBindGroup) pass.setBindGroup(2, mat._uniformBindGroup)
         const idxCount = mat.wireframe ? geo._wireframeIndexCount : geo._indexCount
         pass.drawIndexed(idxCount)
@@ -2212,7 +2254,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
           pass.setVertexBuffer(0, geo._vertexBuffer!)
           if (geo._indexBuffer) pass.setIndexBuffer(geo._indexBuffer, geo._indexFormat)
         }
-        pass.setBindGroup(1, this.objectBindGroup, [(base + i) * this.objectStride])
+        pass.setBindGroup(1, objBindGroup, [(base + i) * objStride])
         if (geo._indexCount > 0) pass.drawIndexed(geo._indexCount)
         else pass.draw(geo._vertexCount)
         this.info.drawCalls++
@@ -2242,7 +2284,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
       if (normalSpriteCount > 0) {
         pass.setPipeline(this.spriteNormalPipeline)
         for (let i = 0; i < normalSpriteCount; i++) {
-          pass.setBindGroup(1, this.objectBindGroup, [(spriteBase + i) * this.objectStride])
+          pass.setBindGroup(1, objBindGroup, [(spriteBase + i) * objStride])
           pass.drawIndexed(geo._indexCount)
           this.info.drawCalls++
           this.info.triangles += 2
@@ -2251,7 +2293,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
       if (additiveSpriteCount > 0) {
         pass.setPipeline(this.spriteAdditivePipeline)
         for (let i = 0; i < additiveSpriteCount; i++) {
-          pass.setBindGroup(1, this.objectBindGroup, [(spriteBase + normalSpriteCount + i) * this.objectStride])
+          pass.setBindGroup(1, objBindGroup, [(spriteBase + normalSpriteCount + i) * objStride])
           pass.drawIndexed(geo._indexCount)
           this.info.drawCalls++
           this.info.triangles += 2
@@ -2285,7 +2327,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         const pipeline =
           is.blending === AdditiveBlending ? this.instancedSpriteAdditivePipeline : this.instancedSpriteNormalPipeline
         pass.setPipeline(pipeline)
-        pass.setBindGroup(1, this.objectBindGroup, [(iSpriteBase + i) * this.objectStride])
+        pass.setBindGroup(1, objBindGroup, [(iSpriteBase + i) * objStride])
         pass.setBindGroup(2, is._instanceBindGroup!)
         pass.drawIndexed(geo._indexCount, is.count)
         this.info.drawCalls++
