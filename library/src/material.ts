@@ -7,6 +7,15 @@ export const BackSide = 1
 export const DoubleSide = 2
 export type Side = typeof FrontSide | typeof BackSide | typeof DoubleSide
 
+/**
+ * Diffuse shading model on `MeshLambertMaterial`.
+ * - `'lambert'` (default): `max(N·L, 0)`. Edges drop to 0 — punchy contrast.
+ * - `'half-lambert'`: Valve's `(N·L·0.5 + 0.5)²`. Lifts edge transition to
+ *   ~0.25 of full light, giving softer wraparound. Same [0,1] envelope, so a
+ *   light budget of `ambient + directional = 1` peaks at white in both modes.
+ */
+export type Shading = 'lambert' | 'half-lambert'
+
 /** GPU texture wrapper for nanothree. */
 export class NanoTexture {
   _gpuTexture: GPUTexture | null = null
@@ -92,6 +101,8 @@ export class MeshLambertMaterial {
   emissive: Color
   /** Scalar multiplier on `emissive` before it's added. Defaults to 1. */
   emissiveIntensity: number
+  /** Diffuse shading model. See {@link Shading}. Defaults to `'lambert'`. */
+  shading: Shading
   wireframe: boolean
   side: Side
   /** When true, per-vertex colors from the geometry are used (multiplied with material color). */
@@ -138,6 +149,7 @@ export class MeshLambertMaterial {
     color?: Color | number
     emissive?: Color | number
     emissiveIntensity?: number
+    shading?: Shading
     wireframe?: boolean
     side?: Side
     map?: NanoTexture
@@ -158,6 +170,7 @@ export class MeshLambertMaterial {
       this.emissive = new Color(0, 0, 0)
     }
     this.emissiveIntensity = params?.emissiveIntensity ?? 1
+    this.shading = params?.shading ?? 'lambert'
     this.wireframe = params?.wireframe ?? false
     this.side = params?.side ?? FrontSide
     this.vertexColors = params?.vertexColors ?? false

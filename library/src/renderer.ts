@@ -86,7 +86,9 @@ struct VSOut {
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let n = normalize(in.normal);
-  let light = max(dot(n, scene.lightDir.xyz), 0.0);
+  let ndotl = dot(n, scene.lightDir.xyz);
+  // emissive.a packs shading mode: 0=lambert, 1=half-lambert (Valve).
+  let light = select(max(ndotl, 0.0), pow(ndotl * 0.5 + 0.5, 2.0), objectData.emissive.a > 0.5);
 
   var shadow = 1.0;
   if (scene.shadowParams.x > 0.0) {
@@ -155,7 +157,9 @@ struct VSOut {
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let n = normalize(in.normal);
-  let light = max(dot(n, scene.lightDir.xyz), 0.0);
+  let ndotl = dot(n, scene.lightDir.xyz);
+  // emissive.a packs shading mode: 0=lambert, 1=half-lambert (Valve).
+  let light = select(max(ndotl, 0.0), pow(ndotl * 0.5 + 0.5, 2.0), objectData.emissive.a > 0.5);
 
   var shadow = 1.0;
   if (scene.shadowParams.x > 0.0) {
@@ -265,7 +269,9 @@ struct VSOut {
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let n = normalize(in.normal);
-  let light = max(dot(n, scene.lightDir.xyz), 0.0);
+  let ndotl = dot(n, scene.lightDir.xyz);
+  // emissive.a packs shading mode: 0=lambert, 1=half-lambert (Valve).
+  let light = select(max(ndotl, 0.0), pow(ndotl * 0.5 + 0.5, 2.0), objectData.emissive.a > 0.5);
 
   var shadow = 1.0;
   if (scene.shadowParams.x > 0.0) {
@@ -411,7 +417,9 @@ struct VSOut {
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let n = normalize(in.normal);
-  let light = max(dot(n, scene.lightDir.xyz), 0.0);
+  let ndotl = dot(n, scene.lightDir.xyz);
+  // emissive.a packs shading mode: 0=lambert, 1=half-lambert (Valve).
+  let light = select(max(ndotl, 0.0), pow(ndotl * 0.5 + 0.5, 2.0), objectData.emissive.a > 0.5);
 
   var shadow = 1.0;
   if (scene.shadowParams.x > 0.0) {
@@ -560,7 +568,9 @@ struct VSOut {
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let n = normalize(in.normal);
-  let light = max(dot(n, scene.lightDir.xyz), 0.0);
+  let ndotl = dot(n, scene.lightDir.xyz);
+  // emissive.a packs shading mode: 0=lambert, 1=half-lambert (Valve).
+  let light = select(max(ndotl, 0.0), pow(ndotl * 0.5 + 0.5, 2.0), objectData.emissive.a > 0.5);
 
   var shadow = 1.0;
   if (scene.shadowParams.x > 0.0) {
@@ -642,7 +652,9 @@ struct VSOut {
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
   let n = normalize(in.normal);
-  let light = max(dot(n, scene.lightDir.xyz), 0.0);
+  let ndotl = dot(n, scene.lightDir.xyz);
+  // emissive.a packs shading mode: 0=lambert, 1=half-lambert (Valve).
+  let light = select(max(ndotl, 0.0), pow(ndotl * 0.5 + 0.5, 2.0), objectData.emissive.a > 0.5);
 
   var shadow = 1.0;
   if (scene.shadowParams.x > 0.0) {
@@ -698,6 +710,12 @@ const OBJECT_FLOATS = 24
 const INITIAL_CAPACITY = 1024
 const SHADOW_MAP_SIZE = 2048
 const SHADOW_BIAS = 0.003
+
+// When bloom is enabled, the scene is rendered into an HDR offscreen target
+// so emissive can exceed 1.0 and the bloom pass can find true bright spots.
+// The composite pass tone-maps HDR -> canvas LDR. When bloom is disabled,
+// the renderer uses canvas LDR pipelines and writes straight to the canvas.
+const HDR_FORMAT: GPUTextureFormat = 'rgba16float'
 
 // viewProj(16) + lightDir(4) + ambient(4) + lightColor(4) + lightViewProj(16) + shadowParams(4)
 // + cameraRight(4) + cameraUp(4) = 56
@@ -889,6 +907,13 @@ export class WebGPURenderer {
   /** Optional post-process bloom. Toggle with `renderer.bloom.enabled = true`. */
   bloom = new BloomPass()
 
+  /**
+   * Format that built-in color-writing pipelines were last compiled against.
+   * Driven by `bloom.enabled`: LDR canvas format when bloom is off, HDR when
+   * on. Tracked so we only recompile pipelines when the format changes.
+   */
+  private _pipelineFormat!: GPUTextureFormat
+
   // True when the adapter requires the writeTexture upload workaround
   // (currently: Pixel 10 PowerVR img-tec/d-series).
   private _needsWriteTextureWorkaround = false
@@ -947,11 +972,12 @@ export class WebGPURenderer {
     this.createBindGroupLayouts()
     this.createShadowResources()
     this.createTextureResources()
-    this.createBuiltinPipelines()
+    this._pipelineFormat = this.format
+    this.createBuiltinPipelines(this.format)
     this.createBuffers(INITIAL_CAPACITY)
     this.createBindGroups()
     this.ensureDepthTexture()
-    this.bloom.init(this.device, this.format)
+    this.bloom.init(this.device, HDR_FORMAT, this.format)
   }
 
   private createBindGroupLayouts() {
@@ -1108,14 +1134,14 @@ export class WebGPURenderer {
     return bg
   }
 
-  private createBuiltinPipelines() {
+  private createBuiltinPipelines(format: GPUTextureFormat) {
     const meshShader = this.device.createShaderModule({ code: MESH_SHADER })
     const lineShader = this.device.createShaderModule({ code: LINE_SHADER })
 
     const meshPipelineDesc = (cullMode: GPUCullMode) => ({
       layout: this.standardPipelineLayout,
       vertex: { module: meshShader, entryPoint: 'vs', buffers: [VERTEX_BUFFER_LAYOUT] },
-      fragment: { module: meshShader, entryPoint: 'fs', targets: [{ format: this.format }] },
+      fragment: { module: meshShader, entryPoint: 'fs', targets: [{ format }] },
       primitive: { topology: 'triangle-list' as GPUPrimitiveTopology, cullMode },
       depthStencil: DEPTH_STENCIL,
     })
@@ -1127,7 +1153,7 @@ export class WebGPURenderer {
     const basicPipelineDesc = (cullMode: GPUCullMode) => ({
       layout: this.standardPipelineLayout,
       vertex: { module: lineShader, entryPoint: 'vs', buffers: [VERTEX_BUFFER_LAYOUT] },
-      fragment: { module: lineShader, entryPoint: 'fs', targets: [{ format: this.format }] },
+      fragment: { module: lineShader, entryPoint: 'fs', targets: [{ format }] },
       primitive: { topology: 'triangle-list' as GPUPrimitiveTopology, cullMode },
       depthStencil: DEPTH_STENCIL,
     })
@@ -1137,14 +1163,14 @@ export class WebGPURenderer {
     this.wireframePipeline = this.device.createRenderPipeline({
       layout: this.standardPipelineLayout,
       vertex: { module: meshShader, entryPoint: 'vs', buffers: [VERTEX_BUFFER_LAYOUT] },
-      fragment: { module: meshShader, entryPoint: 'fs', targets: [{ format: this.format }] },
+      fragment: { module: meshShader, entryPoint: 'fs', targets: [{ format }] },
       primitive: { topology: 'line-list', cullMode: 'none' },
       depthStencil: DEPTH_STENCIL,
     })
     this.linePipeline = this.device.createRenderPipeline({
       layout: this.standardPipelineLayout,
       vertex: { module: lineShader, entryPoint: 'vs', buffers: [VERTEX_BUFFER_LAYOUT] },
-      fragment: { module: lineShader, entryPoint: 'fs', targets: [{ format: this.format }] },
+      fragment: { module: lineShader, entryPoint: 'fs', targets: [{ format }] },
       primitive: { topology: 'line-list', cullMode: 'none' },
       depthStencil: DEPTH_STENCIL,
     })
@@ -1154,7 +1180,7 @@ export class WebGPURenderer {
     const vcMeshDesc = (cullMode: GPUCullMode) => ({
       layout: this.standardPipelineLayout,
       vertex: { module: vcMeshShader, entryPoint: 'vs', buffers: [VERTEX_COLOR_BUFFER_LAYOUT] },
-      fragment: { module: vcMeshShader, entryPoint: 'fs', targets: [{ format: this.format }] },
+      fragment: { module: vcMeshShader, entryPoint: 'fs', targets: [{ format }] },
       primitive: { topology: 'triangle-list' as GPUPrimitiveTopology, cullMode },
       depthStencil: DEPTH_STENCIL,
     })
@@ -1167,7 +1193,7 @@ export class WebGPURenderer {
     const vcBasicDesc = (cullMode: GPUCullMode) => ({
       layout: this.standardPipelineLayout,
       vertex: { module: vcBasicShader, entryPoint: 'vs', buffers: [VERTEX_COLOR_BUFFER_LAYOUT] },
-      fragment: { module: vcBasicShader, entryPoint: 'fs', targets: [{ format: this.format }] },
+      fragment: { module: vcBasicShader, entryPoint: 'fs', targets: [{ format }] },
       primitive: { topology: 'triangle-list' as GPUPrimitiveTopology, cullMode },
       depthStencil: DEPTH_STENCIL,
     })
@@ -1204,7 +1230,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     const spriteDesc = (blend: GPUBlendState) => ({
       layout: this.standardPipelineLayout,
       vertex: { module: spriteShader, entryPoint: 'vs', buffers: [VERTEX_BUFFER_LAYOUT] },
-      fragment: { module: spriteShader, entryPoint: 'fs', targets: [{ format: this.format, blend }] },
+      fragment: { module: spriteShader, entryPoint: 'fs', targets: [{ format, blend }] },
       primitive: { topology: 'triangle-list' as GPUPrimitiveTopology, cullMode: 'none' as GPUCullMode },
       depthStencil: SPRITE_DEPTH,
     })
@@ -1226,7 +1252,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     const instancedDesc = (cullMode: GPUCullMode) => ({
       layout: this.instancedPipelineLayout,
       vertex: { module: instancedShader, entryPoint: 'vs', buffers: [VERTEX_BUFFER_LAYOUT] },
-      fragment: { module: instancedShader, entryPoint: 'fs', targets: [{ format: this.format }] },
+      fragment: { module: instancedShader, entryPoint: 'fs', targets: [{ format }] },
       primitive: { topology: 'triangle-list' as GPUPrimitiveTopology, cullMode },
       depthStencil: DEPTH_STENCIL,
     })
@@ -1247,7 +1273,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     const iSpriteDesc = (blend: GPUBlendState) => ({
       layout: this.instancedPipelineLayout,
       vertex: { module: iSpriteShader, entryPoint: 'vs', buffers: [VERTEX_BUFFER_LAYOUT] },
-      fragment: { module: iSpriteShader, entryPoint: 'fs', targets: [{ format: this.format, blend }] },
+      fragment: { module: iSpriteShader, entryPoint: 'fs', targets: [{ format, blend }] },
       primitive: { topology: 'triangle-list' as GPUPrimitiveTopology, cullMode: 'none' as GPUCullMode },
       depthStencil: SPRITE_DEPTH,
     })
@@ -1274,7 +1300,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         entryPoint: 'fs',
         targets: [
           {
-            format: this.format,
+            format,
             blend: {
               color: {
                 srcFactor: 'src-alpha' as GPUBlendFactor,
@@ -1302,7 +1328,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     const skinnedDesc = (cullMode: GPUCullMode) => ({
       layout: this.skinnedPipelineLayout,
       vertex: { module: skinnedShader, entryPoint: 'vs', buffers: [SKINNED_VERTEX_BUFFER_LAYOUT] },
-      fragment: { module: skinnedShader, entryPoint: 'fs', targets: [{ format: this.format }] },
+      fragment: { module: skinnedShader, entryPoint: 'fs', targets: [{ format }] },
       primitive: { topology: 'triangle-list' as GPUPrimitiveTopology, cullMode },
       depthStencil: DEPTH_STENCIL,
     })
@@ -1320,7 +1346,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         entryPoint: 'fs',
         targets: [
           {
-            format: this.format,
+            format,
             blend: {
               color: {
                 srcFactor: 'src-alpha' as GPUBlendFactor,
@@ -1358,6 +1384,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     const cached = this.customPipelineCache.get(key)
     if (cached) return cached
 
+    const format = this._pipelineFormat
     const module = this.device.createShaderModule({ code: material.fullCode })
     const layout = material.uniforms ? this.customPipelineLayout : this.standardPipelineLayout
     const topology: GPUPrimitiveTopology = material.wireframe ? 'line-list' : 'triangle-list'
@@ -1366,12 +1393,26 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     const pipeline = this.device.createRenderPipeline({
       layout,
       vertex: { module, entryPoint: 'vs', buffers: [VERTEX_BUFFER_LAYOUT] },
-      fragment: { module, entryPoint: 'fs', targets: [{ format: this.format }] },
+      fragment: { module, entryPoint: 'fs', targets: [{ format }] },
       primitive: { topology, cullMode },
       depthStencil: DEPTH_STENCIL,
     })
     this.customPipelineCache.set(key, pipeline)
     return pipeline
+  }
+
+  /**
+   * Recompile all color-writing pipelines for a different scene-color format,
+   * if needed. Cheap when bloom state doesn't change; on toggle, recompiles
+   * ~30 pipelines and clears the custom-shader cache (those rebuild lazily).
+   * Called once per `render()` before any draws are encoded.
+   */
+  private _ensurePipelines() {
+    const want: GPUTextureFormat = this.bloom.enabled ? HDR_FORMAT : this.format
+    if (this._pipelineFormat === want) return
+    this._pipelineFormat = want
+    this.createBuiltinPipelines(want)
+    this.customPipelineCache.clear()
   }
 
   private createBuffers(capacity: number) {
@@ -1440,7 +1481,11 @@ struct ObjectData { model: mat4x4f, color: vec4f }
 
   setPixelRatio(_r: number) {}
 
-  /** Copy pre-computed world matrix + color + emissive into the object staging buffer. */
+  /**
+   * Copy pre-computed world matrix + color + emissive into the object staging buffer.
+   * `shading` (0 = lambert, 1 = half-lambert) is packed into `emissive.a`, which
+   * is otherwise unused — lit shaders branch on it to pick the diffuse term.
+   */
   private writeObjectData(
     idx: number,
     worldMatrix: Float32Array,
@@ -1450,6 +1495,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     er = 0,
     eg = 0,
     eb = 0,
+    shading = 0,
   ) {
     const off = idx * this.objectFloatStride
     this.objectStaging.set(worldMatrix, off)
@@ -1460,7 +1506,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     this.objectStaging[off + 20] = er
     this.objectStaging[off + 21] = eg
     this.objectStaging[off + 22] = eb
-    this.objectStaging[off + 23] = 0
+    this.objectStaging[off + 23] = shading
   }
 
   // ── Main render ───────────────────────────────────────────────────
@@ -1468,6 +1514,10 @@ struct ObjectData { model: mat4x4f, color: vec4f }
   render(scene: Scene, camera: PerspectiveCamera) {
     this.info.drawCalls = 0
     this.info.triangles = 0
+
+    // Recompile pipelines if bloom state requires a different scene format.
+    // No-op in steady state; the first toggle pays a ~5-10ms hitch.
+    this._ensurePipelines()
 
     // Resize early so VP uses the correct aspect ratio
     const dpr = window.devicePixelRatio
@@ -1644,6 +1694,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
       const m = solidMeshes[i]
       const mat = m.material as MeshLambertMaterial
       const ei = mat.emissiveIntensity
+      const sh = mat.shading === 'half-lambert' ? 1 : 0
       this.writeObjectData(
         idx,
         m._worldMatrix,
@@ -1653,12 +1704,14 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         mat.emissive.r * ei,
         mat.emissive.g * ei,
         mat.emissive.b * ei,
+        sh,
       )
     }
     for (let i = 0; i < texturedCount; i++, idx++) {
       const m = texturedMeshes[i]
       const mat = m.material as MeshLambertMaterial
       const ei = mat.emissiveIntensity
+      const sh = mat.shading === 'half-lambert' ? 1 : 0
       this.writeObjectData(
         idx,
         m._worldMatrix,
@@ -1668,12 +1721,14 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         mat.emissive.r * ei,
         mat.emissive.g * ei,
         mat.emissive.b * ei,
+        sh,
       )
     }
     for (let i = 0; i < skinnedSolidCount; i++, idx++) {
       const m = skinnedSolid[i]
       const mat = m.material as MeshLambertMaterial
       const ei = mat.emissiveIntensity
+      const sh = mat.shading === 'half-lambert' ? 1 : 0
       this.writeObjectData(
         idx,
         m._worldMatrix,
@@ -1683,12 +1738,14 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         mat.emissive.r * ei,
         mat.emissive.g * ei,
         mat.emissive.b * ei,
+        sh,
       )
     }
     for (let i = 0; i < skinnedTexturedCount; i++, idx++) {
       const m = skinnedTextured[i]
       const mat = m.material as MeshLambertMaterial
       const ei = mat.emissiveIntensity
+      const sh = mat.shading === 'half-lambert' ? 1 : 0
       this.writeObjectData(
         idx,
         m._worldMatrix,
@@ -1698,12 +1755,14 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         mat.emissive.r * ei,
         mat.emissive.g * ei,
         mat.emissive.b * ei,
+        sh,
       )
     }
     for (let i = 0; i < vcCount; i++, idx++) {
       const m = vertexColorMeshes[i]
       const mat = m.material as MeshLambertMaterial
       const ei = mat.emissiveIntensity
+      const sh = mat.shading === 'half-lambert' ? 1 : 0
       this.writeObjectData(
         idx,
         m._worldMatrix,
@@ -1713,6 +1772,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         mat.emissive.r * ei,
         mat.emissive.g * ei,
         mat.emissive.b * ei,
+        sh,
       )
     }
     for (let i = 0; i < vcBasicCount; i++, idx++) {
@@ -1723,6 +1783,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
       const m = instancedMeshes[i]
       const mat = m.material as MeshLambertMaterial
       const ei = mat.emissiveIntensity
+      const sh = mat.shading === 'half-lambert' ? 1 : 0
       this.writeObjectData(
         idx,
         m._worldMatrix,
@@ -1732,6 +1793,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         mat.emissive.r * ei,
         mat.emissive.g * ei,
         mat.emissive.b * ei,
+        sh,
       )
     }
     for (let i = 0; i < basicCount; i++, idx++) {

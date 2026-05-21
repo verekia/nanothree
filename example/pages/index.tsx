@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
+  ACESFilmicToneMapping,
+  AgXToneMapping,
   AmbientLight,
   AnimationMixer,
   BoxGeometry,
@@ -13,16 +15,20 @@ import {
   GLTFLoader,
   Mesh,
   MeshLambertMaterial,
+  NeutralToneMapping,
+  NoToneMapping,
   OrbitControls,
   PerspectiveCamera,
   PlaneGeometry,
   Scene,
+  SoftToneMapping,
   SphereGeometry,
   TetrahedronGeometry,
   TorusGeometry,
   WebGPURenderer,
 } from 'nanothree'
 
+import type { Shading, ToneMapping } from 'nanothree'
 import type { BufferGeometry } from 'nanothree'
 
 // ─── Geometry generators with random variations ─────────────────────
@@ -140,6 +146,14 @@ const STATIC_CASES = [
 
 const SKINNED_COUNTS = [100, 200, 500, 1000] as const
 
+const TONEMAP_OPTIONS: ReadonlyArray<{ label: string; value: ToneMapping }> = [
+  { label: 'None', value: NoToneMapping },
+  { label: 'Soft', value: SoftToneMapping },
+  { label: 'Neutral', value: NeutralToneMapping },
+  { label: 'AgX', value: AgXToneMapping },
+  { label: 'ACES', value: ACESFilmicToneMapping },
+]
+
 // ─── Page ───────────────────────────────────────────────────────────
 
 const IndexPage = () => {
@@ -153,6 +167,20 @@ const IndexPage = () => {
   const [bloom, setBloom] = useState(false)
   const bloomRef = useRef(false)
   bloomRef.current = bloom
+  const [toneMapping, setToneMapping] = useState<ToneMapping>(NoToneMapping)
+  const toneMappingRef = useRef<ToneMapping>(NoToneMapping)
+  toneMappingRef.current = toneMapping
+  // Half-Lambert on by default — softer wraparound gives more color dynamics
+  // than plain Lambert across the whole [0,1] envelope.
+  const [halfLambert, setHalfLambert] = useState(true)
+  const halfLambertRef = useRef(true)
+  halfLambertRef.current = halfLambert
+  // Light split: 0 = fully ambient (flat), 1 = fully directional (max shading).
+  // ambient.intensity + dirLight.intensity always == 1 so the brightest lit
+  // pixel hits exactly 1.0 regardless of where the slider sits.
+  const [lightRatio, setLightRatio] = useState(0.7)
+  const lightRatioRef = useRef(0.7)
+  lightRatioRef.current = lightRatio
   const [fps, setFps] = useState(0)
   const [drawCalls, setDrawCalls] = useState(0)
   const [triangles, setTriangles] = useState(0)
@@ -163,13 +191,16 @@ const IndexPage = () => {
     const scene = new Scene()
     const camera = new PerspectiveCamera(60, canvas.clientWidth / canvas.clientHeight, 0.1, 500)
 
-    const ambient = new AmbientLight(0x606080, 0.5)
+    // White ambient + white directional, intensities sum to 1 so the brightest
+    // lit pixel hits exactly 1.0 (both Lambert and half-Lambert peak at the
+    // same value). The split is driven from the Light Ratio slider per frame.
+    const ambient = new AmbientLight(0xffffff, 1 - lightRatioRef.current)
     scene.add(ambient)
 
     // Spread radius scales with count
     const spread = Math.cbrt(count) * 1.5
 
-    const dirLight = new DirectionalLight(0xffffff, 1)
+    const dirLight = new DirectionalLight(0xffffff, lightRatioRef.current)
     dirLight.position.set(spread, spread * 2, spread * 1.5)
     dirLight.shadow.camera.left = -spread * 1.5
     dirLight.shadow.camera.right = spread * 1.5
@@ -184,6 +215,10 @@ const IndexPage = () => {
     // when bloom is off the scene shows pure Lambert color, no emissive.
     const emissiveMats: MeshLambertMaterial[] = []
 
+    const initialShading: Shading = halfLambertRef.current ? 'half-lambert' : 'lambert'
+    // All Lambert materials created here — flipped en masse on toggle.
+    const lambertMats: MeshLambertMaterial[] = []
+
     for (let i = 0; i < count; i++) {
       const geo = makeRandomGeometry(complexity)
       // 20% of meshes get a vivid emissive so the Bloom toggle has obvious
@@ -193,7 +228,9 @@ const IndexPage = () => {
         color: makeRandomColor(),
         emissive: isEmissive ? makeEmissiveColor() : undefined,
         emissiveIntensity: 0,
+        shading: initialShading,
       })
+      lambertMats.push(mat)
       if (isEmissive) emissiveMats.push(mat)
       const mesh = new Mesh(geo, mat)
       mesh.position.set(
@@ -220,14 +257,16 @@ const IndexPage = () => {
     let frameCount = 0
     let fpsAccum = 0
     let lastBloom: boolean | null = null
+    let lastHalfLambert: boolean | null = null
 
     const animate = async () => {
       if (!inited) {
         await renderer.init()
-        // LDR bloom: lower threshold + higher strength so it's visible on
-        // the test cases' muted random colors (lit faces hit ~0.5 brightness).
-        renderer.bloom.threshold = 0.5
-        renderer.bloom.strength = 1.2
+        // Lit Lambert pixels peak at exactly 1.0 thanks to the normalized
+        // ambient + directional split. Threshold 1.01 keeps lit surfaces
+        // sub-threshold so only emissive (which sits in HDR space at 4+) blooms.
+        renderer.bloom.threshold = 1.01
+        renderer.bloom.strength = 0.8
         inited = true
       }
       raf = requestAnimationFrame(animate)
@@ -251,10 +290,25 @@ const IndexPage = () => {
         m.castShadow = s
         m.receiveShadow = s
       }
+      // Light ratio: ambient = 1 - r, directional = r. Sum always 1.
+      const r = lightRatioRef.current
+      ambient.intensity = 1 - r
+      dirLight.intensity = r
+
+      const hl = halfLambertRef.current
+      if (hl !== lastHalfLambert) {
+        const mode: Shading = hl ? 'half-lambert' : 'lambert'
+        for (const m of lambertMats) m.shading = mode
+        lastHalfLambert = hl
+      }
+
       const bloomOn = bloomRef.current
       renderer.bloom.enabled = bloomOn
+      renderer.bloom.toneMapping = toneMappingRef.current
       if (bloomOn !== lastBloom) {
-        const intensity = bloomOn ? 1 : 0
+        // In HDR, intensity 4 pushes emissive well above the bloom threshold
+        // so emissive surfaces clearly bloom while lit Lambert stays clean.
+        const intensity = bloomOn ? 4 : 0
         for (const m of emissiveMats) m.emissiveIntensity = intensity
         lastBloom = bloomOn
       }
@@ -277,13 +331,14 @@ const IndexPage = () => {
     const scene = new Scene()
     const camera = new PerspectiveCamera(60, canvas.clientWidth / canvas.clientHeight, 0.1, 500)
 
-    const ambient = new AmbientLight(0x506070, 0.6)
+    // White ambient + white directional, intensities sum to 1.
+    const ambient = new AmbientLight(0xffffff, 1 - lightRatioRef.current)
     scene.add(ambient)
     const mixers: AnimationMixer[] = []
     const spread = Math.sqrt(count) * 2
     const skinnedMeshes: import('nanothree').Object3D[] = []
 
-    const dirLight = new DirectionalLight(0xffffff, 1.2)
+    const dirLight = new DirectionalLight(0xffffff, lightRatioRef.current)
     dirLight.position.set(spread * 0.5, spread, spread * 0.7)
     dirLight.shadow.mapSize.set(2048, 2048)
     dirLight.shadow.camera.left = -spread
@@ -294,8 +349,14 @@ const IndexPage = () => {
     dirLight.shadow.camera.far = spread * 4
     scene.add(dirLight)
 
+    const initialShading: Shading = halfLambertRef.current ? 'half-lambert' : 'lambert'
+    // All Lambert materials we control. Walked en masse on the shading toggle.
+    const lambertMats: MeshLambertMaterial[] = []
+
     // Ground
-    const ground = new Mesh(new PlaneGeometry(spread * 4, spread * 4), new MeshLambertMaterial({ color: 0x445544 }))
+    const groundMat = new MeshLambertMaterial({ color: 0x445544, shading: initialShading })
+    lambertMats.push(groundMat)
+    const ground = new Mesh(new PlaneGeometry(spread * 4, spread * 4), groundMat)
     ground.rotation.x = -Math.PI / 2
     scene.add(ground)
 
@@ -310,8 +371,10 @@ const IndexPage = () => {
     ) => {
       if (node.isSkinnedMesh && node.material) {
         node.material.emissive = emissive
-        node.material.emissiveIntensity = bloomRef.current ? 1 : 0
+        node.material.emissiveIntensity = bloomRef.current ? 4 : 0
+        node.material.shading = halfLambertRef.current ? 'half-lambert' : 'lambert'
         emissiveMats.push(node.material)
+        lambertMats.push(node.material)
       }
       for (const child of node.children) applySkinnedEmissive(child as typeof node, emissive)
     }
@@ -358,14 +421,15 @@ const IndexPage = () => {
     let frameCount = 0
     let fpsAccum = 0
     let lastBloom: boolean | null = null
+    let lastHalfLambert: boolean | null = null
 
     const animate = async () => {
       if (!inited) {
         await renderer.init()
-        // Textured characters rarely have pixels above 0.85, so drop the
-        // threshold and crank strength so bloom is visible when toggled on.
-        renderer.bloom.threshold = 0.5
-        renderer.bloom.strength = 1.5
+        // Lit pixels peak at exactly 1.0 from the normalized light split.
+        // Threshold 1.01 isolates emissive glow (which lives in HDR > 1).
+        renderer.bloom.threshold = 1.01
+        renderer.bloom.strength = 0.8
         inited = true
       }
       raf = requestAnimationFrame(animate)
@@ -385,10 +449,26 @@ const IndexPage = () => {
       renderer.shadowMap.enabled = s
       dirLight.castShadow = s
       ground.receiveShadow = s
+
+      // Light ratio: ambient = 1 - r, directional = r. Sum always 1.
+      const r = lightRatioRef.current
+      ambient.intensity = 1 - r
+      dirLight.intensity = r
+
+      const hl = halfLambertRef.current
+      if (hl !== lastHalfLambert) {
+        const mode: Shading = hl ? 'half-lambert' : 'lambert'
+        for (const m of lambertMats) m.shading = mode
+        lastHalfLambert = hl
+      }
+
       const bloomOn = bloomRef.current
       renderer.bloom.enabled = bloomOn
+      renderer.bloom.toneMapping = toneMappingRef.current
       if (bloomOn !== lastBloom) {
-        const intensity = bloomOn ? 1 : 0
+        // In HDR, intensity 4 pushes emissive well above the bloom threshold
+        // so emissive surfaces clearly bloom while lit Lambert stays clean.
+        const intensity = bloomOn ? 4 : 0
         for (const m of emissiveMats) m.emissiveIntensity = intensity
         lastBloom = bloomOn
       }
@@ -506,6 +586,35 @@ const IndexPage = () => {
         >
           Bloom {bloom ? 'ON' : 'OFF'}
         </button>
+        <button
+          onClick={() => setHalfLambert(h => !h)}
+          className={`cursor-pointer rounded px-3 py-1.5 ${halfLambert ? 'bg-emerald-500 text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
+        >
+          Half-Lambert {halfLambert ? 'ON' : 'OFF'}
+        </button>
+        <label className="flex items-center gap-2 rounded bg-white/10 px-3 py-1.5 text-white/80">
+          <span>Light {lightRatio.toFixed(2)}</span>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={lightRatio}
+            onChange={e => setLightRatio(Number(e.target.value))}
+            className="cursor-pointer"
+          />
+        </label>
+        <select
+          value={toneMapping}
+          onChange={e => setToneMapping(Number(e.target.value) as ToneMapping)}
+          className="cursor-pointer rounded bg-white/10 px-3 py-1.5 text-white/80 hover:bg-white/20"
+        >
+          {TONEMAP_OPTIONS.map(o => (
+            <option key={o.value} value={o.value}>
+              Tonemap: {o.label}
+            </option>
+          ))}
+        </select>
       </div>
     </div>
   )
