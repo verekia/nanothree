@@ -88,6 +88,10 @@ export class NanoTexture {
 
 export class MeshLambertMaterial {
   color: Color
+  /** Emissive color added to the final fragment output, independent of lighting. */
+  emissive: Color
+  /** Scalar multiplier on `emissive` before it's added. Defaults to 1. */
+  emissiveIntensity: number
   wireframe: boolean
   side: Side
   /** When true, per-vertex colors from the geometry are used (multiplied with material color). */
@@ -132,6 +136,8 @@ export class MeshLambertMaterial {
 
   constructor(params?: {
     color?: Color | number
+    emissive?: Color | number
+    emissiveIntensity?: number
     wireframe?: boolean
     side?: Side
     map?: NanoTexture
@@ -144,6 +150,14 @@ export class MeshLambertMaterial {
     } else {
       this.color = new Color(0xffffff)
     }
+    if (params?.emissive instanceof Color) {
+      this.emissive = params.emissive
+    } else if (typeof params?.emissive === 'number') {
+      this.emissive = new Color(params.emissive)
+    } else {
+      this.emissive = new Color(0, 0, 0)
+    }
+    this.emissiveIntensity = params?.emissiveIntensity ?? 1
     this.wireframe = params?.wireframe ?? false
     this.side = params?.side ?? FrontSide
     this.vertexColors = params?.vertexColors ?? false

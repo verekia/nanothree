@@ -112,6 +112,18 @@ function makeRandomColor(): Color {
   return new Color(f(0), f(8), f(4))
 }
 
+// Vivid, fully-saturated hue for emissive — picks primary/secondary-ish
+// colors so the bloom halo reads as a clear glow rather than tinted white.
+function makeEmissiveColor(): Color {
+  const h = Math.random()
+  const a = 0.5
+  const f = (n: number) => {
+    const k = (n + h * 12) % 12
+    return 0.5 - a * Math.max(Math.min(k - 3, 9 - k, 1), -1)
+  }
+  return new Color(f(0), f(8), f(4))
+}
+
 // ─── Demos ──────────────────────────────────────────────────────────
 
 type Demo = 'static' | 'skinned'
@@ -138,6 +150,9 @@ const IndexPage = () => {
   const [shadows, setShadows] = useState(false)
   const shadowsRef = useRef(false)
   shadowsRef.current = shadows
+  const [bloom, setBloom] = useState(false)
+  const bloomRef = useRef(false)
+  bloomRef.current = bloom
   const [fps, setFps] = useState(0)
   const [drawCalls, setDrawCalls] = useState(0)
   const [triangles, setTriangles] = useState(0)
@@ -164,10 +179,22 @@ const IndexPage = () => {
     dirLight.shadow.camera.far = spread * 6
     scene.add(dirLight)
     const meshes: Mesh[] = []
+    // Materials with an emissive color set. Their `emissiveIntensity` is
+    // flipped between 0 and 1 in lockstep with the Bloom toggle so that
+    // when bloom is off the scene shows pure Lambert color, no emissive.
+    const emissiveMats: MeshLambertMaterial[] = []
 
     for (let i = 0; i < count; i++) {
       const geo = makeRandomGeometry(complexity)
-      const mat = new MeshLambertMaterial({ color: makeRandomColor() })
+      // 20% of meshes get a vivid emissive so the Bloom toggle has obvious
+      // glowing sources scattered through the scene.
+      const isEmissive = Math.random() < 0.2
+      const mat = new MeshLambertMaterial({
+        color: makeRandomColor(),
+        emissive: isEmissive ? makeEmissiveColor() : undefined,
+        emissiveIntensity: 0,
+      })
+      if (isEmissive) emissiveMats.push(mat)
       const mesh = new Mesh(geo, mat)
       mesh.position.set(
         (Math.random() - 0.5) * spread * 2,
@@ -192,10 +219,15 @@ const IndexPage = () => {
     let inited = false
     let frameCount = 0
     let fpsAccum = 0
+    let lastBloom: boolean | null = null
 
     const animate = async () => {
       if (!inited) {
         await renderer.init()
+        // LDR bloom: lower threshold + higher strength so it's visible on
+        // the test cases' muted random colors (lit faces hit ~0.5 brightness).
+        renderer.bloom.threshold = 0.5
+        renderer.bloom.strength = 1.2
         inited = true
       }
       raf = requestAnimationFrame(animate)
@@ -218,6 +250,13 @@ const IndexPage = () => {
         m.rotation.y += dt * 1.5
         m.castShadow = s
         m.receiveShadow = s
+      }
+      const bloomOn = bloomRef.current
+      renderer.bloom.enabled = bloomOn
+      if (bloomOn !== lastBloom) {
+        const intensity = bloomOn ? 1 : 0
+        for (const m of emissiveMats) m.emissiveIntensity = intensity
+        lastBloom = bloomOn
       }
 
       orbit.update()
@@ -260,6 +299,23 @@ const IndexPage = () => {
     ground.rotation.x = -Math.PI / 2
     scene.add(ground)
 
+    // Collected SkinnedMesh materials whose `emissive` was tinted on load.
+    // Intensity is flipped between 0 and 1 in sync with the Bloom toggle so
+    // that when bloom is off the characters render with no emissive at all.
+    const emissiveMats: MeshLambertMaterial[] = []
+
+    const applySkinnedEmissive = (
+      node: { children: unknown[]; isSkinnedMesh?: boolean; material?: MeshLambertMaterial },
+      emissive: Color,
+    ) => {
+      if (node.isSkinnedMesh && node.material) {
+        node.material.emissive = emissive
+        node.material.emissiveIntensity = bloomRef.current ? 1 : 0
+        emissiveMats.push(node.material)
+      }
+      for (const child of node.children) applySkinnedEmissive(child as typeof node, emissive)
+    }
+
     // GLTFLoader caches the first load and deep-clones on each subsequent call
     const loader = new GLTFLoader()
     for (let i = 0; i < count; i++) {
@@ -268,6 +324,11 @@ const IndexPage = () => {
         result => {
           result.scene.position.set((Math.random() - 0.5) * spread, 0, (Math.random() - 0.5) * spread)
           result.scene.rotation.set(0, Math.random() * Math.PI * 2, 0)
+          // Pick a per-character hue so neighbouring characters glow different colors.
+          applySkinnedEmissive(
+            result.scene as unknown as Parameters<typeof applySkinnedEmissive>[0],
+            makeEmissiveColor(),
+          )
           scene.add(result.scene)
           skinnedMeshes.push(result.scene)
 
@@ -296,10 +357,15 @@ const IndexPage = () => {
     let inited = false
     let frameCount = 0
     let fpsAccum = 0
+    let lastBloom: boolean | null = null
 
     const animate = async () => {
       if (!inited) {
         await renderer.init()
+        // Textured characters rarely have pixels above 0.85, so drop the
+        // threshold and crank strength so bloom is visible when toggled on.
+        renderer.bloom.threshold = 0.5
+        renderer.bloom.strength = 1.5
         inited = true
       }
       raf = requestAnimationFrame(animate)
@@ -319,6 +385,13 @@ const IndexPage = () => {
       renderer.shadowMap.enabled = s
       dirLight.castShadow = s
       ground.receiveShadow = s
+      const bloomOn = bloomRef.current
+      renderer.bloom.enabled = bloomOn
+      if (bloomOn !== lastBloom) {
+        const intensity = bloomOn ? 1 : 0
+        for (const m of emissiveMats) m.emissiveIntensity = intensity
+        lastBloom = bloomOn
+      }
       for (const m of skinnedMeshes) {
         m.castShadow = s
         m.receiveShadow = s
@@ -426,6 +499,12 @@ const IndexPage = () => {
           className={`cursor-pointer rounded px-3 py-1.5 ${shadows ? 'bg-amber-500 text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
         >
           Shadows {shadows ? 'ON' : 'OFF'}
+        </button>
+        <button
+          onClick={() => setBloom(b => !b)}
+          className={`cursor-pointer rounded px-3 py-1.5 ${bloom ? 'bg-fuchsia-500 text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
+        >
+          Bloom {bloom ? 'ON' : 'OFF'}
         </button>
       </div>
     </div>

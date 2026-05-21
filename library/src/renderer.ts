@@ -8,6 +8,7 @@
 //    c. Custom shader meshes (per-ShaderMaterial WGSL)
 //    d. Lines (line-list, unlit flat color)
 
+import { BloomPass } from './bloom'
 import { PlaneGeometry } from './geometry'
 import { BackSide, DoubleSide, MeshBasicMaterial, type NanoTexture } from './material'
 import { mat4Ortho, mat4LookAt, mat4Multiply } from './math'
@@ -51,7 +52,7 @@ struct Scene {
   shadowParams: vec4f,
 }
 
-struct ObjectData { model: mat4x4f, color: vec4f }
+struct ObjectData { model: mat4x4f, color: vec4f, emissive: vec4f }
 
 @group(0) @binding(0) var<uniform> scene: Scene;
 @group(0) @binding(1) var shadowMap: texture_depth_2d;
@@ -101,8 +102,8 @@ struct VSOut {
     ) * 0.25;
   }
 
-  let color = in.color * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
-  return vec4f(color, 1.0);
+  let lit = in.color * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
+  return vec4f(lit + objectData.emissive.rgb, 1.0);
 }
 `
 
@@ -118,7 +119,7 @@ struct Scene {
   shadowParams: vec4f,
 }
 
-struct ObjectData { model: mat4x4f, color: vec4f }
+struct ObjectData { model: mat4x4f, color: vec4f, emissive: vec4f }
 
 @group(0) @binding(0) var<uniform> scene: Scene;
 @group(0) @binding(1) var shadowMap: texture_depth_2d;
@@ -169,8 +170,8 @@ struct VSOut {
     ) * 0.25;
   }
 
-  let color = in.color * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
-  return vec4f(color, 1.0);
+  let lit = in.color * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
+  return vec4f(lit + objectData.emissive.rgb, 1.0);
 }
 `
 
@@ -225,7 +226,7 @@ struct Scene {
   shadowParams: vec4f,
 }
 
-struct ObjectData { model: mat4x4f, color: vec4f }
+struct ObjectData { model: mat4x4f, color: vec4f, emissive: vec4f }
 
 @group(0) @binding(0) var<uniform> scene: Scene;
 @group(0) @binding(1) var shadowMap: texture_depth_2d;
@@ -280,8 +281,8 @@ struct VSOut {
   }
 
   let texColor = textureSample(albedoTexture, albedoSampler, in.uv);
-  let color = in.color * texColor.rgb * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
-  return vec4f(color, texColor.a);
+  let lit = in.color * texColor.rgb * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
+  return vec4f(lit + objectData.emissive.rgb, texColor.a);
 }
 `
 
@@ -371,7 +372,7 @@ struct Scene {
   shadowParams: vec4f,
 }
 
-struct ObjectData { model: mat4x4f, color: vec4f }
+struct ObjectData { model: mat4x4f, color: vec4f, emissive: vec4f }
 struct InstanceData { model: mat4x4f, color: vec4f }
 
 @group(0) @binding(0) var<uniform> scene: Scene;
@@ -425,8 +426,8 @@ struct VSOut {
     ) * 0.25;
   }
 
-  let color = in.color * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
-  return vec4f(color, 1.0);
+  let lit = in.color * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
+  return vec4f(lit + objectData.emissive.rgb, 1.0);
 }
 `
 
@@ -513,7 +514,7 @@ struct Scene {
   shadowParams: vec4f,
 }
 
-struct ObjectData { model: mat4x4f, color: vec4f }
+struct ObjectData { model: mat4x4f, color: vec4f, emissive: vec4f }
 
 @group(0) @binding(0) var<uniform> scene: Scene;
 @group(0) @binding(1) var shadowMap: texture_depth_2d;
@@ -574,8 +575,8 @@ struct VSOut {
     ) * 0.25;
   }
 
-  let color = in.color * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
-  return vec4f(color, 1.0);
+  let lit = in.color * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
+  return vec4f(lit + objectData.emissive.rgb, 1.0);
 }
 `
 
@@ -591,7 +592,7 @@ struct Scene {
   shadowParams: vec4f,
 }
 
-struct ObjectData { model: mat4x4f, color: vec4f }
+struct ObjectData { model: mat4x4f, color: vec4f, emissive: vec4f }
 
 @group(0) @binding(0) var<uniform> scene: Scene;
 @group(0) @binding(1) var shadowMap: texture_depth_2d;
@@ -657,8 +658,8 @@ struct VSOut {
   }
 
   let texColor = textureSample(albedoTexture, albedoSampler, in.uv);
-  let color = in.color * texColor.rgb * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
-  return vec4f(color, texColor.a);
+  let lit = in.color * texColor.rgb * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
+  return vec4f(lit + objectData.emissive.rgb, texColor.a);
 }
 `
 
@@ -690,7 +691,10 @@ struct ObjectData { model: mat4x4f, color: vec4f }
 
 // ─── Constants ────────────────────────────────────────────────────────
 
-const OBJECT_FLOATS = 20
+// model(16) + color(4) + emissive(4) = 24 floats / 96 bytes. Non-lit shaders
+// declare a smaller `ObjectData` struct and only read the first 80 bytes; that
+// is valid in WGSL as long as the declared struct size <= binding size.
+const OBJECT_FLOATS = 24
 const INITIAL_CAPACITY = 1024
 const SHADOW_MAP_SIZE = 2048
 const SHADOW_BIAS = 0.003
@@ -882,6 +886,9 @@ export class WebGPURenderer {
 
   shadowMap = { enabled: false }
 
+  /** Optional post-process bloom. Toggle with `renderer.bloom.enabled = true`. */
+  bloom = new BloomPass()
+
   // True when the adapter requires the writeTexture upload workaround
   // (currently: Pixel 10 PowerVR img-tec/d-series).
   private _needsWriteTextureWorkaround = false
@@ -944,6 +951,7 @@ export class WebGPURenderer {
     this.createBuffers(INITIAL_CAPACITY)
     this.createBindGroups()
     this.ensureDepthTexture()
+    this.bloom.init(this.device, this.format)
   }
 
   private createBindGroupLayouts() {
@@ -1432,14 +1440,27 @@ struct ObjectData { model: mat4x4f, color: vec4f }
 
   setPixelRatio(_r: number) {}
 
-  /** Copy pre-computed world matrix + color into the object staging buffer. */
-  private writeObjectData(idx: number, worldMatrix: Float32Array, cr: number, cg: number, cb: number) {
+  /** Copy pre-computed world matrix + color + emissive into the object staging buffer. */
+  private writeObjectData(
+    idx: number,
+    worldMatrix: Float32Array,
+    cr: number,
+    cg: number,
+    cb: number,
+    er = 0,
+    eg = 0,
+    eb = 0,
+  ) {
     const off = idx * this.objectFloatStride
     this.objectStaging.set(worldMatrix, off)
     this.objectStaging[off + 16] = cr
     this.objectStaging[off + 17] = cg
     this.objectStaging[off + 18] = cb
     this.objectStaging[off + 19] = 1
+    this.objectStaging[off + 20] = er
+    this.objectStaging[off + 21] = eg
+    this.objectStaging[off + 22] = eb
+    this.objectStaging[off + 23] = 0
   }
 
   // ── Main render ───────────────────────────────────────────────────
@@ -1621,23 +1642,78 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     let idx = 0
     for (let i = 0; i < solidCount; i++, idx++) {
       const m = solidMeshes[i]
-      this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      const mat = m.material as MeshLambertMaterial
+      const ei = mat.emissiveIntensity
+      this.writeObjectData(
+        idx,
+        m._worldMatrix,
+        mat.color.r,
+        mat.color.g,
+        mat.color.b,
+        mat.emissive.r * ei,
+        mat.emissive.g * ei,
+        mat.emissive.b * ei,
+      )
     }
     for (let i = 0; i < texturedCount; i++, idx++) {
       const m = texturedMeshes[i]
-      this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      const mat = m.material as MeshLambertMaterial
+      const ei = mat.emissiveIntensity
+      this.writeObjectData(
+        idx,
+        m._worldMatrix,
+        mat.color.r,
+        mat.color.g,
+        mat.color.b,
+        mat.emissive.r * ei,
+        mat.emissive.g * ei,
+        mat.emissive.b * ei,
+      )
     }
     for (let i = 0; i < skinnedSolidCount; i++, idx++) {
       const m = skinnedSolid[i]
-      this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      const mat = m.material as MeshLambertMaterial
+      const ei = mat.emissiveIntensity
+      this.writeObjectData(
+        idx,
+        m._worldMatrix,
+        mat.color.r,
+        mat.color.g,
+        mat.color.b,
+        mat.emissive.r * ei,
+        mat.emissive.g * ei,
+        mat.emissive.b * ei,
+      )
     }
     for (let i = 0; i < skinnedTexturedCount; i++, idx++) {
       const m = skinnedTextured[i]
-      this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      const mat = m.material as MeshLambertMaterial
+      const ei = mat.emissiveIntensity
+      this.writeObjectData(
+        idx,
+        m._worldMatrix,
+        mat.color.r,
+        mat.color.g,
+        mat.color.b,
+        mat.emissive.r * ei,
+        mat.emissive.g * ei,
+        mat.emissive.b * ei,
+      )
     }
     for (let i = 0; i < vcCount; i++, idx++) {
       const m = vertexColorMeshes[i]
-      this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      const mat = m.material as MeshLambertMaterial
+      const ei = mat.emissiveIntensity
+      this.writeObjectData(
+        idx,
+        m._worldMatrix,
+        mat.color.r,
+        mat.color.g,
+        mat.color.b,
+        mat.emissive.r * ei,
+        mat.emissive.g * ei,
+        mat.emissive.b * ei,
+      )
     }
     for (let i = 0; i < vcBasicCount; i++, idx++) {
       const m = vertexColorBasicMeshes[i]
@@ -1645,7 +1721,18 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     }
     for (let i = 0; i < instancedCount; i++, idx++) {
       const m = instancedMeshes[i]
-      this.writeObjectData(idx, m._worldMatrix, m.material.color.r, m.material.color.g, m.material.color.b)
+      const mat = m.material as MeshLambertMaterial
+      const ei = mat.emissiveIntensity
+      this.writeObjectData(
+        idx,
+        m._worldMatrix,
+        mat.color.r,
+        mat.color.g,
+        mat.color.b,
+        mat.emissive.r * ei,
+        mat.emissive.g * ei,
+        mat.emissive.b * ei,
+      )
     }
     for (let i = 0; i < basicCount; i++, idx++) {
       const m = basicMeshes[i]
@@ -1906,7 +1993,10 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     }
 
     // ── Main color pass ─────────────────────────────────────────
-    this.colorAtt.view = this.context.getCurrentTexture().createView()
+    const useBloom = this.bloom.enabled
+    if (useBloom) this.bloom.resize(this.canvas.width, this.canvas.height)
+    const canvasTexture = this.context.getCurrentTexture()
+    this.colorAtt.view = useBloom ? this.bloom.sceneView! : canvasTexture.createView()
     this.depthAtt.view = this.depthView
     const pass = encoder.beginRenderPass(this.passDesc)
     pass.setBindGroup(0, this.sceneBindGroup)
@@ -2345,6 +2435,9 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     }
 
     pass.end()
+
+    if (useBloom) this.bloom.encode(encoder, canvasTexture.createView())
+
     this.device.queue.submit([encoder.finish()])
   }
 
@@ -2355,6 +2448,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     this.shadowMapTexture?.destroy()
     this.shadowLightBuffer?.destroy()
     this.whiteTexture?.destroy()
+    this.bloom.dispose()
     this.customPipelineCache.clear()
     this.textureBindGroups.clear()
     this.device?.destroy()

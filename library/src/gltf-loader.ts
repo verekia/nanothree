@@ -590,7 +590,11 @@ function buildMaterials(json: GLTFJson, textures: (NanoTexture | null)[]): MeshL
       }
     }
 
-    const mat = new MeshLambertMaterial({ color })
+    const emissive = matDef.emissiveFactor
+      ? new Color(matDef.emissiveFactor[0], matDef.emissiveFactor[1], matDef.emissiveFactor[2])
+      : new Color(0, 0, 0)
+
+    const mat = new MeshLambertMaterial({ color, emissive })
     if (map) mat.map = map
     if (matDef.doubleSided) mat.side = 2 // DoubleSide
     return mat
