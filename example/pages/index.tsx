@@ -35,7 +35,10 @@ function randomInt(min: number, max: number) {
   return Math.floor(randomRange(min, max + 1))
 }
 
-function makeRandomGeometry(): BufferGeometry {
+type Complexity = 'low' | 'high'
+
+function makeRandomGeometry(complexity: Complexity = 'low'): BufferGeometry {
+  const hi = complexity === 'high'
   const type = randomInt(0, 8)
   switch (type) {
     case 0:
@@ -43,32 +46,56 @@ function makeRandomGeometry(): BufferGeometry {
         randomRange(0.2, 1.5),
         randomRange(0.2, 2),
         randomRange(0.2, 1.5),
-        randomInt(1, 3),
-        randomInt(1, 3),
-        randomInt(1, 3),
+        hi ? randomInt(8, 16) : randomInt(1, 3),
+        hi ? randomInt(8, 16) : randomInt(1, 3),
+        hi ? randomInt(8, 16) : randomInt(1, 3),
       )
     case 1:
-      return new SphereGeometry(randomRange(0.2, 0.8), randomInt(6, 24), randomInt(4, 16))
+      return new SphereGeometry(
+        randomRange(0.2, 0.8),
+        hi ? randomInt(32, 64) : randomInt(6, 24),
+        hi ? randomInt(16, 32) : randomInt(4, 16),
+      )
     case 2:
-      return new CapsuleGeometry(randomRange(0.1, 0.5), randomRange(0.2, 1.2), randomInt(2, 8), randomInt(4, 16))
+      return new CapsuleGeometry(
+        randomRange(0.1, 0.5),
+        randomRange(0.2, 1.2),
+        hi ? randomInt(8, 16) : randomInt(2, 8),
+        hi ? randomInt(16, 32) : randomInt(4, 16),
+      )
     case 3:
       return new CylinderGeometry(
         randomRange(0.1, 0.6),
         randomRange(0.1, 0.8),
         randomRange(0.3, 2),
-        randomInt(4, 24),
-        randomInt(1, 4),
+        hi ? randomInt(32, 64) : randomInt(4, 24),
+        hi ? randomInt(4, 8) : randomInt(1, 4),
       )
     case 4:
-      return new ConeGeometry(randomRange(0.2, 0.8), randomRange(0.4, 2), randomInt(4, 24), randomInt(1, 3))
+      return new ConeGeometry(
+        randomRange(0.2, 0.8),
+        randomRange(0.4, 2),
+        hi ? randomInt(32, 64) : randomInt(4, 24),
+        hi ? randomInt(4, 8) : randomInt(1, 3),
+      )
     case 5:
-      return new CircleGeometry(randomRange(0.2, 0.8), randomInt(4, 24))
+      return new CircleGeometry(randomRange(0.2, 0.8), hi ? randomInt(32, 64) : randomInt(4, 24))
     case 6:
-      return new TorusGeometry(randomRange(0.3, 0.7), randomRange(0.05, 0.25), randomInt(4, 16), randomInt(8, 32))
+      return new TorusGeometry(
+        randomRange(0.3, 0.7),
+        randomRange(0.05, 0.25),
+        hi ? randomInt(16, 32) : randomInt(4, 16),
+        hi ? randomInt(32, 64) : randomInt(8, 32),
+      )
     case 7:
       return new TetrahedronGeometry(randomRange(0.3, 0.8))
     default:
-      return new PlaneGeometry(randomRange(0.3, 1.5), randomRange(0.3, 1.5), randomInt(1, 4), randomInt(1, 4))
+      return new PlaneGeometry(
+        randomRange(0.3, 1.5),
+        randomRange(0.3, 1.5),
+        hi ? randomInt(8, 16) : randomInt(1, 4),
+        hi ? randomInt(8, 16) : randomInt(1, 4),
+      )
   }
 }
 
@@ -89,7 +116,16 @@ function makeRandomColor(): Color {
 
 type Demo = 'static' | 'skinned'
 
-const STATIC_COUNTS = [1000, 5000, 10000, 20000] as const
+const STATIC_CASES = [
+  { label: '1,000 objects', count: 1000, complexity: 'low' },
+  { label: '5,000 objects', count: 5000, complexity: 'low' },
+  { label: '10,000 objects', count: 10000, complexity: 'low' },
+  { label: '20,000 objects', count: 20000, complexity: 'low' },
+  { label: '1,000 high-poly', count: 1000, complexity: 'high' },
+  { label: '5,000 high-poly', count: 5000, complexity: 'high' },
+  { label: '10,000 high-poly', count: 10000, complexity: 'high' },
+] as const satisfies ReadonlyArray<{ label: string; count: number; complexity: Complexity }>
+
 const SKINNED_COUNTS = [100, 200, 500, 1000] as const
 
 // ─── Page ───────────────────────────────────────────────────────────
@@ -97,7 +133,7 @@ const SKINNED_COUNTS = [100, 200, 500, 1000] as const
 const IndexPage = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [demo, setDemo] = useState<Demo>('static')
-  const [staticCount, setStaticCount] = useState<number>(1000)
+  const [staticCaseIndex, setStaticCaseIndex] = useState(0)
   const [skinnedCount, setSkinnedCount] = useState<number>(100)
   const [shadows, setShadows] = useState(false)
   const shadowsRef = useRef(false)
@@ -107,7 +143,7 @@ const IndexPage = () => {
   const [triangles, setTriangles] = useState(0)
   const cleanupRef = useRef<(() => void) | null>(null)
 
-  const runStatic = useCallback((canvas: HTMLCanvasElement, count: number) => {
+  const runStatic = useCallback((canvas: HTMLCanvasElement, count: number, complexity: Complexity) => {
     const renderer = new WebGPURenderer({ canvas })
     const scene = new Scene()
     const camera = new PerspectiveCamera(60, canvas.clientWidth / canvas.clientHeight, 0.1, 500)
@@ -130,7 +166,7 @@ const IndexPage = () => {
     const meshes: Mesh[] = []
 
     for (let i = 0; i < count; i++) {
-      const geo = makeRandomGeometry()
+      const geo = makeRandomGeometry(complexity)
       const mat = new MeshLambertMaterial({ color: makeRandomColor() })
       const mesh = new Mesh(geo, mat)
       mesh.position.set(
@@ -308,7 +344,8 @@ const IndexPage = () => {
 
     cleanupRef.current?.()
     if (demo === 'static') {
-      cleanupRef.current = runStatic(canvas, staticCount)
+      const c = STATIC_CASES[staticCaseIndex]!
+      cleanupRef.current = runStatic(canvas, c.count, c.complexity)
     } else {
       cleanupRef.current = runSkinned(canvas, skinnedCount)
     }
@@ -316,7 +353,7 @@ const IndexPage = () => {
       cleanupRef.current?.()
       cleanupRef.current = null
     }
-  }, [demo, staticCount, skinnedCount, runStatic, runSkinned])
+  }, [demo, staticCaseIndex, skinnedCount, runStatic, runSkinned])
 
   return (
     <div className="fixed inset-0 bg-black">
@@ -360,13 +397,13 @@ const IndexPage = () => {
         </button>
         {demo === 'static' && (
           <select
-            value={staticCount}
-            onChange={e => setStaticCount(Number(e.target.value))}
+            value={staticCaseIndex}
+            onChange={e => setStaticCaseIndex(Number(e.target.value))}
             className="cursor-pointer rounded bg-white/10 px-3 py-1.5 text-white/80 hover:bg-white/20"
           >
-            {STATIC_COUNTS.map(c => (
-              <option key={c} value={c}>
-                {c.toLocaleString()} objects
+            {STATIC_CASES.map((c, i) => (
+              <option key={c.label} value={i}>
+                {c.label}
               </option>
             ))}
           </select>
