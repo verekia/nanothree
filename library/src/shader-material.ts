@@ -26,13 +26,42 @@ import { Color } from './core'
 //
 // Pipeline: sRGB encoded -> EOTF decode (gamma 2.2) -> linear sRGB ->
 // OKLab LMS -> cube root -> Lab -> scale (a, b) -> inverse to LMS -> cube ->
-// linear sRGB -> linear Display-P3 -> clamp -> EOTF encode -> P3 encoded.
-// The EOTF roundtrip is what keeps boost ≈ 0 colorimetrically identical to
-// the sRGB fast path: skip it and the linear-domain matrix amplifies chroma
-// on gamma-encoded values, making low boosts look much deeper than they
-// should. Hue is preserved because (a, b) scale together. The clamp is a
-// hard gamut cap; visible only at high boosts on already-saturated inputs.
+// linear sRGB -> linear Display-P3 -> hue-preserving gamut clip ->
+// EOTF encode -> P3 encoded.
+//
+// The EOTF roundtrip keeps boost ≈ 0 colorimetrically identical to the sRGB
+// fast path (skip it and the linear-domain matrix amplifies chroma on
+// gamma-encoded values, making low boosts look much deeper than they should).
+//
+// The gamut clip is hue-preserving: instead of clamping linear-P3 channels
+// independently (which slides oranges toward red and magentas toward purple
+// once chroma is pushed past the P3 edge), we bisect the chroma scale in
+// OKLab between 1.0 (the colorimetric P3 of the input — guaranteed in-gamut
+// since sRGB ⊂ P3) and the requested scale. Six iterations land within
+// ~1.5% of the gamut edge while keeping L and hue fixed.
 export const P3_BOOST_WGSL = /* wgsl */ `
+fn _p3b_oklab_chroma_to_linp3(L: f32, k_l: f32, k_m: f32, k_s: f32, scale: f32) -> vec3f {
+  let l_ = L + scale * k_l;
+  let m_ = L + scale * k_m;
+  let s_ = L + scale * k_s;
+  let ll = l_ * l_ * l_;
+  let mm = m_ * m_ * m_;
+  let ss = s_ * s_ * s_;
+  let rs =  4.0767416621 * ll - 3.3077115913 * mm + 0.2309699292 * ss;
+  let gs = -1.2684380046 * ll + 2.6097574011 * mm - 0.3413193965 * ss;
+  let bs = -0.0041960863 * ll - 0.7034186147 * mm + 1.7076147010 * ss;
+  let rp = 0.8224621 * rs + 0.1775380 * gs;
+  let gp = 0.0331942 * rs + 0.9668058 * gs;
+  let bp = 0.0170828 * rs + 0.0723976 * gs + 0.9105197 * bs;
+  return vec3f(rp, gp, bp);
+}
+
+fn _p3b_in_gamut(c: vec3f) -> bool {
+  let lo = min(min(c.r, c.g), c.b);
+  let hi = max(max(c.r, c.g), c.b);
+  return lo >= 0.0 && hi <= 1.0;
+}
+
 fn applyP3Boost(c: vec3f, boost: f32) -> vec3f {
   if (boost <= 0.0) { return c; }
   let lin = pow(max(c, vec3f(0.0)), vec3f(2.2));
@@ -45,22 +74,34 @@ fn applyP3Boost(c: vec3f, boost: f32) -> vec3f {
   let L  = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_;
   let a0 = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_;
   let b0 = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_;
-  let scale = 1.0 + boost * 0.5;
-  let a = a0 * scale;
-  let b = b0 * scale;
-  let ll_ = L + 0.3963377774 * a + 0.2158037573 * b;
-  let lm_ = L - 0.1055613458 * a - 0.0638541728 * b;
-  let ls_ = L - 0.0894841775 * a - 1.2914855480 * b;
-  let ll = ll_ * ll_ * ll_;
-  let lm = lm_ * lm_ * lm_;
-  let ls = ls_ * ls_ * ls_;
-  let rs =  4.0767416621 * ll - 3.3077115913 * lm + 0.2309699292 * ls;
-  let gs = -1.2684380046 * ll + 2.6097574011 * lm - 0.3413193965 * ls;
-  let bs = -0.0041960863 * ll - 0.7034186147 * lm + 1.7076147010 * ls;
-  let rp = 0.8224621 * rs + 0.1775380 * gs;
-  let gp = 0.0331942 * rs + 0.9668058 * gs;
-  let bp = 0.0170828 * rs + 0.0723976 * gs + 0.9105197 * bs;
-  let p3lin = clamp(vec3f(rp, gp, bp), vec3f(0.0), vec3f(1.0));
+  // Per-unit-scale LMS' deltas along the constant-hue line from gray (L, 0, 0).
+  let k_l =  0.3963377774 * a0 + 0.2158037573 * b0;
+  let k_m = -0.1055613458 * a0 - 0.0638541728 * b0;
+  let k_s = -0.0894841775 * a0 - 1.2914855480 * b0;
+  let target = 1.0 + boost * 0.5;
+  let p3_target = _p3b_oklab_chroma_to_linp3(L, k_l, k_m, k_s, target);
+  var p3 = p3_target;
+  if (!_p3b_in_gamut(p3_target)) {
+    // Bisect chroma scale in [1, target] to find the largest still inside P3.
+    // sRGB ⊂ P3 guarantees scale = 1 is in-gamut, so the search is well-formed.
+    var lo = 1.0;
+    var hi = target;
+    var best = _p3b_oklab_chroma_to_linp3(L, k_l, k_m, k_s, 1.0);
+    for (var i = 0; i < 6; i = i + 1) {
+      let mid = 0.5 * (lo + hi);
+      let test = _p3b_oklab_chroma_to_linp3(L, k_l, k_m, k_s, mid);
+      if (_p3b_in_gamut(test)) {
+        lo = mid;
+        best = test;
+      } else {
+        hi = mid;
+      }
+    }
+    p3 = best;
+  }
+  // Tiny numerical excess from the bisection rounding — safe to clamp now,
+  // chroma is already at the boundary so this can't shift hue.
+  let p3lin = clamp(p3, vec3f(0.0), vec3f(1.0));
   return pow(p3lin, vec3f(1.0 / 2.2));
 }
 `
