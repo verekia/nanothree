@@ -106,8 +106,11 @@ fn applyP3Boost(c: vec3f, boost: f32) -> vec3f {
 }
 `
 
-export const SHADER_PREAMBLE =
-  /* wgsl */ `
+// Single source of truth for the per-frame Scene UBO. The renderer's
+// `sceneData` write must match this layout byte-for-byte; both the
+// built-in shaders (renderer.ts) and user ShaderMaterials import this
+// to avoid silent drift between the two.
+export const SCENE_STRUCT_WGSL = /* wgsl */ `
 struct Scene {
   viewProj: mat4x4f,
   lightDir: vec4f,
@@ -120,22 +123,51 @@ struct Scene {
   p3Boost: vec4f,       // x: P3 saturation boost amount (0..1)
 }
 
+@group(0) @binding(0) var<uniform> scene: Scene;
+@group(0) @binding(1) var shadowMap: texture_depth_2d;
+@group(0) @binding(2) var shadowSampler: sampler_comparison;
+`
+
+export const SHADER_PREAMBLE =
+  SCENE_STRUCT_WGSL +
+  /* wgsl */ `
 struct ObjectData {
   model: mat4x4f,
   color: vec4f,
 }
 
-@group(0) @binding(0) var<uniform> scene: Scene;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
-@group(0) @binding(2) var shadowSampler: sampler_comparison;
 @group(1) @binding(0) var<storage, read> objectData: ObjectData;
-` + P3_BOOST_WGSL
+` +
+  P3_BOOST_WGSL
 
 export interface ShaderMaterialParams {
   code: string
   uniforms?: Float32Array
   color?: Color | number
   wireframe?: boolean
+}
+
+// Strips `//` line comments and `/* */` block comments. WGSL has no string
+// literals, so this is straightforward — and necessary because the parser
+// below uses `indexOf('@fragment fn fs')`, which would otherwise be fooled
+// by that string appearing inside a comment.
+function stripWgslComments(s: string): string {
+  let out = ''
+  let i = 0
+  while (i < s.length) {
+    if (s[i] === '/' && s[i + 1] === '/') {
+      i += 2
+      while (i < s.length && s[i] !== '\n') i++
+    } else if (s[i] === '/' && s[i + 1] === '*') {
+      i += 2
+      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++
+      i += 2
+    } else {
+      out += s[i]
+      i++
+    }
+  }
+  return out
 }
 
 // Splits a comma-separated WGSL parameter list at top-level commas only
@@ -160,16 +192,17 @@ function splitTopLevelCommas(s: string): string[] {
 // Rewrites the user's `@fragment fn fs(...) -> @location(0) vec4f { ... }`
 // into a plain `fn _p3b_fs_inner_(...) -> vec4f { ... }` and appends a new
 // `fs` entry point that pipes the result through `applyP3Boost`. If the
-// signature doesn't match (e.g. multi-target output), the code is returned
-// untouched.
-function wrapFragmentForP3Boost(code: string): string {
+// signature doesn't match (e.g. multi-target output, struct return), the
+// code is returned untouched and the boost has no effect on that shader.
+function wrapFragmentForP3Boost(rawCode: string): string {
+  const code = stripWgslComments(rawCode)
   const tag = '@fragment fn fs'
   const tagIdx = code.indexOf(tag)
-  if (tagIdx === -1) return code
+  if (tagIdx === -1) return rawCode
 
   let i = tagIdx + tag.length
   while (i < code.length && code[i] !== '(') i++
-  if (i >= code.length) return code
+  if (i >= code.length) return rawCode
   const argStart = i + 1
 
   let depth = 1
@@ -179,13 +212,13 @@ function wrapFragmentForP3Boost(code: string): string {
     else if (code[i] === ')') depth--
     i++
   }
-  if (depth !== 0) return code
+  if (depth !== 0) return rawCode
   const argEnd = i - 1
   const argsStr = code.slice(argStart, argEnd)
 
   const after = code.slice(i)
   const retMatch = /^\s*->\s*@location\(0\)\s*vec4f\s*\{/.exec(after)
-  if (!retMatch) return code
+  if (!retMatch) return rawCode
   const bodyStart = i + retMatch[0].length
 
   const argNames = splitTopLevelCommas(argsStr)

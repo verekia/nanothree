@@ -12,7 +12,7 @@ import { BloomPass } from './bloom'
 import { PlaneGeometry } from './geometry'
 import { BackSide, DoubleSide, MeshBasicMaterial, type NanoTexture } from './material'
 import { mat4Ortho, mat4LookAt, mat4Multiply } from './math'
-import { P3_BOOST_WGSL, ShaderMaterial } from './shader-material'
+import { P3_BOOST_WGSL, SCENE_STRUCT_WGSL, ShaderMaterial } from './shader-material'
 import { AdditiveBlending } from './sprite'
 import { NoToneMapping, ToneMappingPass, type ToneMapping } from './tonemap'
 
@@ -31,25 +31,10 @@ import type { Sprite } from './sprite'
 // Every color-emitting built-in shader prepends this so they all see the
 // same UBO layout (matched by the renderer's `sceneData` write) and call
 // `applyP3Boost(rgb, scene.p3Boost.x)` on their final fragment output.
+// The Scene struct is shared with user ShaderMaterials (see SHADER_PREAMBLE
+// in shader-material.ts) so the two can never drift apart.
 
-const COLOR_SHADER_PREAMBLE =
-  /* wgsl */ `
-struct Scene {
-  viewProj: mat4x4f,
-  lightDir: vec4f,
-  ambient: vec4f,
-  lightColor: vec4f,
-  lightViewProj: mat4x4f,
-  shadowParams: vec4f,
-  cameraRight: vec4f,
-  cameraUp: vec4f,
-  p3Boost: vec4f,
-}
-
-@group(0) @binding(0) var<uniform> scene: Scene;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
-@group(0) @binding(2) var shadowSampler: sampler_comparison;
-` + P3_BOOST_WGSL
+const COLOR_SHADER_PREAMBLE = SCENE_STRUCT_WGSL + P3_BOOST_WGSL
 
 // ─── Shadow depth pass shader (vertex-only) ───────────────────────────
 
@@ -891,13 +876,13 @@ export class WebGPURenderer {
    * saturation uniformly across hues — i.e. without favouring red/green
    * the way a naive `'srgb' -> 'display-p3'` reinterpretation does. At `1`
    * chroma is multiplied by 1.5 in OKLab (a strong but mostly in-gamut
-   * boost); higher inputs hard-clamp at the P3 gamut edge.
+   * boost). Values outside `[0, 1]` are clamped.
    */
   get p3Boost(): number {
     return this._p3Boost
   }
   set p3Boost(v: number) {
-    const next = v > 0 ? v : 0
+    const next = v > 1 ? 1 : v > 0 ? v : 0
     if (this._p3Boost === next) return
     const wasOn = this._p3Boost > 0
     this._p3Boost = next

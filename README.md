@@ -214,7 +214,7 @@ The preamble provides these bindings:
 | 1     | 0       | `storage ObjectData` | Per-object model matrix and color                                                                                   |
 | 2     | 0       | (yours)              | Custom uniforms Float32Array                                                                                        |
 
-Your `fs` output is automatically wrapped with `applyP3Boost(rgb, scene.p3Boost.x)` so the renderer's `p3Boost` setting (see [Saturation / P3 boost](#saturation--p3-boost)) applies to custom shaders too. The helper is also exported as `P3_BOOST_WGSL` if you need to call it explicitly.
+Your `fs` output is automatically wrapped with `applyP3Boost(rgb, scene.p3Boost.x)` so the renderer's `p3Boost` setting (see [Saturation / P3 boost](#saturation--p3-boost)) applies to custom shaders too. Auto-wrap only fires when your fragment entry point has the canonical signature `@fragment fn fs(...) -> @location(0) vec4f { ... }` — multi-target or struct-returning fragments must call `applyP3Boost` themselves. The helper is also exported as `P3_BOOST_WGSL` if you need to call it explicitly.
 
 ### Lights
 
