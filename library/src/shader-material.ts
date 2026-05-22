@@ -78,14 +78,14 @@ fn applyP3Boost(c: vec3f, boost: f32) -> vec3f {
   let k_l =  0.3963377774 * a0 + 0.2158037573 * b0;
   let k_m = -0.1055613458 * a0 - 0.0638541728 * b0;
   let k_s = -0.0894841775 * a0 - 1.2914855480 * b0;
-  let target = 1.0 + boost * 0.5;
-  let p3_target = _p3b_oklab_chroma_to_linp3(L, k_l, k_m, k_s, target);
+  let tgt = 1.0 + boost * 0.5;
+  let p3_target = _p3b_oklab_chroma_to_linp3(L, k_l, k_m, k_s, tgt);
   var p3 = p3_target;
   if (!_p3b_in_gamut(p3_target)) {
-    // Bisect chroma scale in [1, target] to find the largest still inside P3.
+    // Bisect chroma scale in [1, tgt] to find the largest still inside P3.
     // sRGB ⊂ P3 guarantees scale = 1 is in-gamut, so the search is well-formed.
     var lo = 1.0;
-    var hi = target;
+    var hi = tgt;
     var best = _p3b_oklab_chroma_to_linp3(L, k_l, k_m, k_s, 1.0);
     for (var i = 0; i < 6; i = i + 1) {
       let mid = 0.5 * (lo + hi);
