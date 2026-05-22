@@ -12,7 +12,7 @@ import { BloomPass } from './bloom'
 import { PlaneGeometry } from './geometry'
 import { BackSide, DoubleSide, MeshBasicMaterial, type NanoTexture } from './material'
 import { mat4Ortho, mat4LookAt, mat4Multiply } from './math'
-import { ShaderMaterial } from './shader-material'
+import { P3_BOOST_WGSL, ShaderMaterial } from './shader-material'
 import { AdditiveBlending } from './sprite'
 import { NoToneMapping, ToneMappingPass, type ToneMapping } from './tonemap'
 
@@ -24,6 +24,32 @@ import type { Mesh } from './mesh'
 import type { Scene } from './scene'
 import type { SkinnedMesh } from './skinned-mesh'
 import type { Sprite } from './sprite'
+
+// ─── Shared preamble for color-writing shaders ────────────────────────
+//
+// Standardised Scene struct + group(0) bindings + the P3 boost helper.
+// Every color-emitting built-in shader prepends this so they all see the
+// same UBO layout (matched by the renderer's `sceneData` write) and call
+// `applyP3Boost(rgb, scene.p3Boost.x)` on their final fragment output.
+
+const COLOR_SHADER_PREAMBLE =
+  /* wgsl */ `
+struct Scene {
+  viewProj: mat4x4f,
+  lightDir: vec4f,
+  ambient: vec4f,
+  lightColor: vec4f,
+  lightViewProj: mat4x4f,
+  shadowParams: vec4f,
+  cameraRight: vec4f,
+  cameraUp: vec4f,
+  p3Boost: vec4f,
+}
+
+@group(0) @binding(0) var<uniform> scene: Scene;
+@group(0) @binding(1) var shadowMap: texture_depth_2d;
+@group(0) @binding(2) var shadowSampler: sampler_comparison;
+` + P3_BOOST_WGSL
 
 // ─── Shadow depth pass shader (vertex-only) ───────────────────────────
 
@@ -43,21 +69,11 @@ struct ObjectData { model: mat4x4f, color: vec4f }
 
 // ─── Main mesh shader (Lambert + shadow map) ──────────────────────────
 
-const MESH_SHADER = /* wgsl */ `
-struct Scene {
-  viewProj: mat4x4f,
-  lightDir: vec4f,
-  ambient: vec4f,
-  lightColor: vec4f,
-  lightViewProj: mat4x4f,
-  shadowParams: vec4f,
-}
-
+const MESH_SHADER =
+  COLOR_SHADER_PREAMBLE +
+  /* wgsl */ `
 struct ObjectData { model: mat4x4f, color: vec4f, emissive: vec4f }
 
-@group(0) @binding(0) var<uniform> scene: Scene;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
-@group(0) @binding(2) var shadowSampler: sampler_comparison;
 @group(1) @binding(0) var<storage, read> objectData: ObjectData;
 
 struct VSOut {
@@ -104,27 +120,17 @@ struct VSOut {
   }
 
   let lit = in.color * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
-  return vec4f(lit + objectData.emissive.rgb, 1.0);
+  return vec4f(applyP3Boost(lit + objectData.emissive.rgb, scene.p3Boost.x), 1.0);
 }
 `
 
 // ─── Vertex-colored mesh shader (Lambert + shadow map + per-vertex color) ─
 
-const VERTEX_COLOR_MESH_SHADER = /* wgsl */ `
-struct Scene {
-  viewProj: mat4x4f,
-  lightDir: vec4f,
-  ambient: vec4f,
-  lightColor: vec4f,
-  lightViewProj: mat4x4f,
-  shadowParams: vec4f,
-}
-
+const VERTEX_COLOR_MESH_SHADER =
+  COLOR_SHADER_PREAMBLE +
+  /* wgsl */ `
 struct ObjectData { model: mat4x4f, color: vec4f, emissive: vec4f }
 
-@group(0) @binding(0) var<uniform> scene: Scene;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
-@group(0) @binding(2) var shadowSampler: sampler_comparison;
 @group(1) @binding(0) var<storage, read> objectData: ObjectData;
 
 struct VSOut {
@@ -172,25 +178,17 @@ struct VSOut {
   }
 
   let lit = in.color * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
-  return vec4f(lit + objectData.emissive.rgb, 1.0);
+  return vec4f(applyP3Boost(lit + objectData.emissive.rgb, scene.p3Boost.x), 1.0);
 }
 `
 
 // ─── Vertex-colored unlit mesh shader (per-vertex color, no lighting) ─
 
-const VERTEX_COLOR_BASIC_SHADER = /* wgsl */ `
-struct Scene {
-  viewProj: mat4x4f,
-  lightDir: vec4f,
-  ambient: vec4f,
-  lightColor: vec4f,
-}
-
+const VERTEX_COLOR_BASIC_SHADER =
+  COLOR_SHADER_PREAMBLE +
+  /* wgsl */ `
 struct ObjectData { model: mat4x4f, color: vec4f }
 
-@group(0) @binding(0) var<uniform> scene: Scene;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
-@group(0) @binding(2) var shadowSampler: sampler_comparison;
 @group(1) @binding(0) var<storage, read> objectData: ObjectData;
 
 struct VSOut {
@@ -211,27 +209,17 @@ struct VSOut {
 }
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
-  return vec4f(in.color, 1.0);
+  return vec4f(applyP3Boost(in.color, scene.p3Boost.x), 1.0);
 }
 `
 
 // ─── Textured mesh shader (Lambert + shadow map + albedo texture) ─────
 
-const TEXTURED_MESH_SHADER = /* wgsl */ `
-struct Scene {
-  viewProj: mat4x4f,
-  lightDir: vec4f,
-  ambient: vec4f,
-  lightColor: vec4f,
-  lightViewProj: mat4x4f,
-  shadowParams: vec4f,
-}
-
+const TEXTURED_MESH_SHADER =
+  COLOR_SHADER_PREAMBLE +
+  /* wgsl */ `
 struct ObjectData { model: mat4x4f, color: vec4f, emissive: vec4f }
 
-@group(0) @binding(0) var<uniform> scene: Scene;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
-@group(0) @binding(2) var shadowSampler: sampler_comparison;
 @group(1) @binding(0) var<storage, read> objectData: ObjectData;
 @group(2) @binding(0) var albedoTexture: texture_2d<f32>;
 @group(2) @binding(1) var albedoSampler: sampler;
@@ -283,25 +271,17 @@ struct VSOut {
 
   let texColor = textureSample(albedoTexture, albedoSampler, in.uv);
   let lit = in.color * texColor.rgb * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
-  return vec4f(lit + objectData.emissive.rgb, texColor.a);
+  return vec4f(applyP3Boost(lit + objectData.emissive.rgb, scene.p3Boost.x), texColor.a);
 }
 `
 
 // ─── Line shader (unlit, no shadows) ──────────────────────────────────
 
-const LINE_SHADER = /* wgsl */ `
-struct Scene {
-  viewProj: mat4x4f,
-  lightDir: vec4f,
-  ambient: vec4f,
-  lightColor: vec4f,
-}
-
+const LINE_SHADER =
+  COLOR_SHADER_PREAMBLE +
+  /* wgsl */ `
 struct ObjectData { model: mat4x4f, color: vec4f }
 
-@group(0) @binding(0) var<uniform> scene: Scene;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
-@group(0) @binding(2) var shadowSampler: sampler_comparison;
 @group(1) @binding(0) var<storage, read> objectData: ObjectData;
 
 struct VSOut {
@@ -320,25 +300,17 @@ struct VSOut {
 }
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
-  return vec4f(in.color, 1.0);
+  return vec4f(applyP3Boost(in.color, scene.p3Boost.x), 1.0);
 }
 `
 
 // ─── Sprite shader (unlit, alpha blending) ───────────────────────────
 
-const SPRITE_SHADER = /* wgsl */ `
-struct Scene {
-  viewProj: mat4x4f,
-  lightDir: vec4f,
-  ambient: vec4f,
-  lightColor: vec4f,
-}
-
+const SPRITE_SHADER =
+  COLOR_SHADER_PREAMBLE +
+  /* wgsl */ `
 struct ObjectData { model: mat4x4f, color: vec4f }
 
-@group(0) @binding(0) var<uniform> scene: Scene;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
-@group(0) @binding(2) var shadowSampler: sampler_comparison;
 @group(1) @binding(0) var<storage, read> objectData: ObjectData;
 
 struct VSOut {
@@ -357,28 +329,18 @@ struct VSOut {
 }
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
-  return in.color;
+  return vec4f(applyP3Boost(in.color.rgb, scene.p3Boost.x), in.color.a);
 }
 `
 
 // ─── Instanced mesh shader (Lambert + shadow + per-instance transform/color) ─
 
-const INSTANCED_MESH_SHADER = /* wgsl */ `
-struct Scene {
-  viewProj: mat4x4f,
-  lightDir: vec4f,
-  ambient: vec4f,
-  lightColor: vec4f,
-  lightViewProj: mat4x4f,
-  shadowParams: vec4f,
-}
-
+const INSTANCED_MESH_SHADER =
+  COLOR_SHADER_PREAMBLE +
+  /* wgsl */ `
 struct ObjectData { model: mat4x4f, color: vec4f, emissive: vec4f }
 struct InstanceData { model: mat4x4f, color: vec4f }
 
-@group(0) @binding(0) var<uniform> scene: Scene;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
-@group(0) @binding(2) var shadowSampler: sampler_comparison;
 @group(1) @binding(0) var<storage, read> objectData: ObjectData;
 @group(2) @binding(0) var<storage, read> instances: array<InstanceData>;
 
@@ -428,7 +390,7 @@ struct VSOut {
   }
 
   let lit = in.color * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
-  return vec4f(lit + objectData.emissive.rgb, 1.0);
+  return vec4f(applyP3Boost(lit + objectData.emissive.rgb, scene.p3Boost.x), 1.0);
 }
 `
 
@@ -453,24 +415,12 @@ struct InstanceData { model: mat4x4f, color: vec4f }
 
 // ─── Instanced sprite shader (GPU billboard + per-instance pos/size/color) ───
 
-const INSTANCED_SPRITE_SHADER = /* wgsl */ `
-struct Scene {
-  viewProj: mat4x4f,
-  lightDir: vec4f,
-  ambient: vec4f,
-  lightColor: vec4f,
-  lightViewProj: mat4x4f,
-  shadowParams: vec4f,
-  cameraRight: vec4f,
-  cameraUp: vec4f,
-}
-
+const INSTANCED_SPRITE_SHADER =
+  COLOR_SHADER_PREAMBLE +
+  /* wgsl */ `
 struct ObjectData { model: mat4x4f, color: vec4f }
 struct SpriteInstance { position: vec3f, size: f32, color: vec3f, alpha: f32 }
 
-@group(0) @binding(0) var<uniform> scene: Scene;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
-@group(0) @binding(2) var shadowSampler: sampler_comparison;
 @group(1) @binding(0) var<storage, read> objectData: ObjectData;
 @group(2) @binding(0) var<storage, read> instances: array<SpriteInstance>;
 
@@ -499,27 +449,17 @@ struct VSOut {
 }
 
 @fragment fn fs(in: VSOut) -> @location(0) vec4f {
-  return in.color;
+  return vec4f(applyP3Boost(in.color.rgb, scene.p3Boost.x), in.color.a);
 }
 `
 
 // ─── Skinned mesh shader (Lambert + shadow + bone skinning) ──────────
 
-const SKINNED_MESH_SHADER = /* wgsl */ `
-struct Scene {
-  viewProj: mat4x4f,
-  lightDir: vec4f,
-  ambient: vec4f,
-  lightColor: vec4f,
-  lightViewProj: mat4x4f,
-  shadowParams: vec4f,
-}
-
+const SKINNED_MESH_SHADER =
+  COLOR_SHADER_PREAMBLE +
+  /* wgsl */ `
 struct ObjectData { model: mat4x4f, color: vec4f, emissive: vec4f }
 
-@group(0) @binding(0) var<uniform> scene: Scene;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
-@group(0) @binding(2) var shadowSampler: sampler_comparison;
 @group(1) @binding(0) var<storage, read> objectData: ObjectData;
 @group(2) @binding(0) var<storage, read> boneMatrices: array<mat4x4f>;
 
@@ -577,27 +517,17 @@ struct VSOut {
   }
 
   let lit = in.color * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
-  return vec4f(lit + objectData.emissive.rgb, 1.0);
+  return vec4f(applyP3Boost(lit + objectData.emissive.rgb, scene.p3Boost.x), 1.0);
 }
 `
 
 // ─── Skinned textured mesh shader (Lambert + shadow + bone skinning + albedo) ─
 
-const SKINNED_TEXTURED_MESH_SHADER = /* wgsl */ `
-struct Scene {
-  viewProj: mat4x4f,
-  lightDir: vec4f,
-  ambient: vec4f,
-  lightColor: vec4f,
-  lightViewProj: mat4x4f,
-  shadowParams: vec4f,
-}
-
+const SKINNED_TEXTURED_MESH_SHADER =
+  COLOR_SHADER_PREAMBLE +
+  /* wgsl */ `
 struct ObjectData { model: mat4x4f, color: vec4f, emissive: vec4f }
 
-@group(0) @binding(0) var<uniform> scene: Scene;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
-@group(0) @binding(2) var shadowSampler: sampler_comparison;
 @group(1) @binding(0) var<storage, read> objectData: ObjectData;
 @group(2) @binding(0) var<storage, read> boneMatrices: array<mat4x4f>;
 @group(3) @binding(0) var albedoTexture: texture_2d<f32>;
@@ -660,7 +590,7 @@ struct VSOut {
 
   let texColor = textureSample(albedoTexture, albedoSampler, in.uv);
   let lit = in.color * texColor.rgb * (scene.ambient.rgb + scene.lightColor.rgb * light * shadow);
-  return vec4f(lit + objectData.emissive.rgb, texColor.a);
+  return vec4f(applyP3Boost(lit + objectData.emissive.rgb, scene.p3Boost.x), texColor.a);
 }
 `
 
@@ -708,8 +638,8 @@ const SHADOW_BIAS = 0.003
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float'
 
 // viewProj(16) + lightDir(4) + ambient(4) + lightColor(4) + lightViewProj(16) + shadowParams(4)
-// + cameraRight(4) + cameraUp(4) = 56
-const SCENE_FLOATS = 56
+// + cameraRight(4) + cameraUp(4) + p3Boost(4) = 60
+const SCENE_FLOATS = 60
 
 const VERTEX_BUFFER_LAYOUT: GPUVertexBufferLayout = {
   arrayStride: 32,
@@ -920,9 +850,11 @@ export class WebGPURenderer {
   // (currently: Pixel 10 PowerVR img-tec/d-series).
   private _needsWriteTextureWorkaround = false
 
-  // Canvas display color space. 'p3' passes the same RGB values through to
-  // a wider-gamut output (an sRGB 1,0,0 becomes a P3 1,0,0).
-  private _colorSpace: 'srgb' | 'p3' = 'srgb'
+  // P3 saturation boost amount, in [0, 1]. 0 keeps the canvas in sRGB and is
+  // bit-exact equivalent to the legacy `colorSpace = 'srgb'` path. Any value
+  // > 0 switches the canvas to `display-p3` and every color-writing shader
+  // runs the OKLab-based boost (see P3_BOOST_WGSL in shader-material.ts).
+  private _p3Boost = 0
 
   /** Per-frame render statistics, updated after each render() call. */
   info = { drawCalls: 0, triangles: 0 }
@@ -952,17 +884,25 @@ export class WebGPURenderer {
   }
 
   /**
-   * Canvas output color space. `'srgb'` (default) or `'p3'`. In P3 mode the
-   * same RGB values are reinterpreted in the wider P3 gamut — an sRGB 1,0,0
-   * becomes a P3 1,0,0 (a more saturated red on capable displays).
+   * P3 saturation boost in `[0, 1]`. At `0` (default) the canvas stays in
+   * sRGB and shaders skip the boost path entirely. Above `0` the canvas is
+   * configured as `display-p3` and shaders push every color (including
+   * sampled textures) through an OKLab-based chroma scale that boosts
+   * saturation uniformly across hues — i.e. without favouring red/green
+   * the way a naive `'srgb' -> 'display-p3'` reinterpretation does. At `1`
+   * chroma is multiplied by 1.5 in OKLab (a strong but mostly in-gamut
+   * boost); higher inputs hard-clamp at the P3 gamut edge.
    */
-  get colorSpace(): 'srgb' | 'p3' {
-    return this._colorSpace
+  get p3Boost(): number {
+    return this._p3Boost
   }
-  set colorSpace(v: 'srgb' | 'p3') {
-    if (this._colorSpace === v) return
-    this._colorSpace = v
-    if (this.device && this.context) this._configureContext()
+  set p3Boost(v: number) {
+    const next = v > 0 ? v : 0
+    if (this._p3Boost === next) return
+    const wasOn = this._p3Boost > 0
+    this._p3Boost = next
+    const nowOn = next > 0
+    if (wasOn !== nowOn && this.device && this.context) this._configureContext()
   }
 
   private _configureContext() {
@@ -970,7 +910,7 @@ export class WebGPURenderer {
       device: this.device,
       format: this.format,
       alphaMode: 'premultiplied',
-      colorSpace: this._colorSpace === 'p3' ? 'display-p3' : 'srgb',
+      colorSpace: this._p3Boost > 0 ? 'display-p3' : 'srgb',
     })
   }
 
@@ -1711,6 +1651,10 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     sd[53] = cm[5]
     sd[54] = cm[6]
     sd[55] = 0
+    sd[56] = this._p3Boost
+    sd[57] = 0
+    sd[58] = 0
+    sd[59] = 0
     this.device.queue.writeBuffer(this.sceneBuffer, 0, sd as unknown as ArrayBuffer)
 
     // ── Stage object data (world matrices already computed by updateMatrixWorld) ──

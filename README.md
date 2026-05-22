@@ -78,8 +78,16 @@ renderer.render(scene, camera)
 renderer.setSize(width, height)
 renderer.setPixelRatio(devicePixelRatio)
 renderer.shadowMap.enabled = true
+renderer.p3Boost = 0 // 0..1 saturation dial — see below
 renderer.info // { drawCalls, triangles }
 ```
+
+#### Saturation / P3 boost
+
+`renderer.p3Boost` is a single dial in `[0, 1]` that boosts saturation into the Display-P3 gamut without changing the overall tint of the scene:
+
+- `0` (default): canvas stays in sRGB. Bit-exact equivalent to the previous `colorSpace: 'srgb'`. Zero runtime cost.
+- `> 0`: canvas switches to `display-p3`. Every color (solid materials, vertex colors, sampled textures, custom shaders) is pushed through an OKLab chroma scale that boosts saturation _uniformly across hues_ — i.e. without favouring red/green the way a naive sRGB→P3 reinterpretation does. At `1` chroma is multiplied by 1.5 in OKLab. The conversion lives in WGSL (`P3_BOOST_WGSL`), so authoring is always done in sRGB — users don't have to think about P3.
 
 ### Scene Graph
 
@@ -198,13 +206,15 @@ const material = new ShaderMaterial({
 
 The preamble provides these bindings:
 
-| Group | Binding | Type                 | Content                                                              |
-| ----- | ------- | -------------------- | -------------------------------------------------------------------- |
-| 0     | 0       | `uniform Scene`      | viewProj, lightDir, ambient, lightColor, lightViewProj, shadowParams |
-| 0     | 1       | `texture_depth_2d`   | Shadow map                                                           |
-| 0     | 2       | `sampler_comparison` | Shadow sampler                                                       |
-| 1     | 0       | `storage ObjectData` | Per-object model matrix and color                                    |
-| 2     | 0       | (yours)              | Custom uniforms Float32Array                                         |
+| Group | Binding | Type                 | Content                                                                                                             |
+| ----- | ------- | -------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| 0     | 0       | `uniform Scene`      | viewProj, lightDir, ambient, lightColor, lightViewProj, shadowParams, cameraRight, cameraUp, p3Boost (`.x = boost`) |
+| 0     | 1       | `texture_depth_2d`   | Shadow map                                                                                                          |
+| 0     | 2       | `sampler_comparison` | Shadow sampler                                                                                                      |
+| 1     | 0       | `storage ObjectData` | Per-object model matrix and color                                                                                   |
+| 2     | 0       | (yours)              | Custom uniforms Float32Array                                                                                        |
+
+Your `fs` output is automatically wrapped with `applyP3Boost(rgb, scene.p3Boost.x)` so the renderer's `p3Boost` setting (see [Saturation / P3 boost](#saturation--p3-boost)) applies to custom shaders too. The helper is also exported as `P3_BOOST_WGSL` if you need to call it explicitly.
 
 ### Lights
 
