@@ -18,21 +18,27 @@
 import { Color } from './core'
 
 // Approximately perceptually uniform saturation boost into the Display-P3
-// gamut. Input is treated as sRGB-encoded (the user's intent for a normal
-// canvas); output is the linear-P3-encoded value to write into a `display-p3`
+// gamut. The input is treated as sRGB-encoded (the renderer's gamma-incorrect
+// convention — Lambert math is done on encoded values and written straight to
+// a non-srgb canvas). Output is the encoded value to write into a `display-p3`
 // canvas. Boost is in [0, 1]: 0 returns the input unchanged (the sRGB fast
 // path), 1 scales chroma by 1.5 in OKLab (strong but mostly in-gamut).
 //
-// Pipeline: linear sRGB -> OKLab LMS -> cube root -> Lab -> scale (a,b) ->
-// inverse to LMS -> cube -> linear sRGB -> linear Display-P3 -> clamp.
-// Hue is preserved because (a, b) are scaled together. The clamp is a hard
-// gamut cap; visible only at high boosts on already-saturated inputs.
+// Pipeline: sRGB encoded -> EOTF decode (gamma 2.2) -> linear sRGB ->
+// OKLab LMS -> cube root -> Lab -> scale (a, b) -> inverse to LMS -> cube ->
+// linear sRGB -> linear Display-P3 -> clamp -> EOTF encode -> P3 encoded.
+// The EOTF roundtrip is what keeps boost ≈ 0 colorimetrically identical to
+// the sRGB fast path: skip it and the linear-domain matrix amplifies chroma
+// on gamma-encoded values, making low boosts look much deeper than they
+// should. Hue is preserved because (a, b) scale together. The clamp is a
+// hard gamut cap; visible only at high boosts on already-saturated inputs.
 export const P3_BOOST_WGSL = /* wgsl */ `
 fn applyP3Boost(c: vec3f, boost: f32) -> vec3f {
   if (boost <= 0.0) { return c; }
-  let l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
-  let m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
-  let s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+  let lin = pow(max(c, vec3f(0.0)), vec3f(2.2));
+  let l = 0.4122214708 * lin.r + 0.5363325363 * lin.g + 0.0514459929 * lin.b;
+  let m = 0.2119034982 * lin.r + 0.6806995451 * lin.g + 0.1073969566 * lin.b;
+  let s = 0.0883024619 * lin.r + 0.2817188376 * lin.g + 0.6299787005 * lin.b;
   let l_ = sign(l) * pow(abs(l), 1.0 / 3.0);
   let m_ = sign(m) * pow(abs(m), 1.0 / 3.0);
   let s_ = sign(s) * pow(abs(s), 1.0 / 3.0);
@@ -54,7 +60,8 @@ fn applyP3Boost(c: vec3f, boost: f32) -> vec3f {
   let rp = 0.8224621 * rs + 0.1775380 * gs;
   let gp = 0.0331942 * rs + 0.9668058 * gs;
   let bp = 0.0170828 * rs + 0.0723976 * gs + 0.9105197 * bs;
-  return clamp(vec3f(rp, gp, bp), vec3f(0.0), vec3f(1.0));
+  let p3lin = clamp(vec3f(rp, gp, bp), vec3f(0.0), vec3f(1.0));
+  return pow(p3lin, vec3f(1.0 / 2.2));
 }
 `
 
