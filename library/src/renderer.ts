@@ -1485,6 +1485,13 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     // No-op in steady state; the first toggle pays a ~5-10ms hitch.
     this._ensurePipelines()
 
+    // HDR path is active when either bloom or tone mapping is on. In that
+    // case the scene shaders write into an rgba16float target so emissive
+    // values >1 survive for bloom thresholding; we must NOT clamp them via
+    // `applyP3Boost` at that stage. Boost runs once at the very end in the
+    // tone-mapping composite instead. In the LDR fast path it stays inline.
+    const usePostProcess = this.bloom.enabled || this.toneMapping !== NoToneMapping
+
     // Resize early so VP uses the correct aspect ratio
     const dpr = window.devicePixelRatio
     const w = (this.canvas.clientWidth * dpr) | 0
@@ -1651,7 +1658,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     sd[53] = cm[5]
     sd[54] = cm[6]
     sd[55] = 0
-    sd[56] = this._p3Boost
+    sd[56] = usePostProcess ? 0 : this._p3Boost
     sd[57] = 0
     sd[58] = 0
     sd[59] = 0
@@ -2013,7 +2020,6 @@ struct ObjectData { model: mat4x4f, color: vec4f }
     }
 
     // ── Main color pass ─────────────────────────────────────────
-    const usePostProcess = this.bloom.enabled || this.toneMapping !== NoToneMapping
     if (usePostProcess) this.toneMappingPass.resize(this.canvas.width, this.canvas.height)
     const canvasTexture = this.context.getCurrentTexture()
     this.colorAtt.view = usePostProcess ? this.toneMappingPass.sceneView! : canvasTexture.createView()
@@ -2467,6 +2473,7 @@ struct ObjectData { model: mat4x4f, color: vec4f }
         this.bloom.enabled ? this.bloom.outputView : null,
         this.bloom.strength,
         this.toneMapping,
+        this._p3Boost,
       )
     }
 
