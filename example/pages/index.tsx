@@ -167,9 +167,9 @@ const IndexPage = () => {
   const [bloom, setBloom] = useState(false)
   const bloomRef = useRef(false)
   bloomRef.current = bloom
-  const [p3, setP3] = useState(false)
-  const p3Ref = useRef(false)
-  p3Ref.current = p3
+  const [p3Boost, setP3Boost] = useState(0)
+  const p3BoostRef = useRef(0)
+  p3BoostRef.current = p3Boost
   const [toneMapping, setToneMapping] = useState<ToneMapping>(NoToneMapping)
   const toneMappingRef = useRef<ToneMapping>(NoToneMapping)
   toneMappingRef.current = toneMapping
@@ -299,7 +299,7 @@ const IndexPage = () => {
       renderer.bloom.strength = bloomStrengthRef.current
       renderer.bloom.radius = bloomRadiusRef.current
       renderer.bloom.threshold = bloomThresholdRef.current
-      renderer.colorSpace = p3Ref.current ? 'p3' : 'srgb'
+      renderer.p3Boost = p3BoostRef.current
       // Drive emissive contribution from the slider when bloom is on; cut to
       // zero when off so the scene shows pure Lambert color.
       const ei = bloomOn ? emissiveIntensityRef.current : 0
@@ -441,7 +441,7 @@ const IndexPage = () => {
       renderer.bloom.strength = bloomStrengthRef.current
       renderer.bloom.radius = bloomRadiusRef.current
       renderer.bloom.threshold = bloomThresholdRef.current
-      renderer.colorSpace = p3Ref.current ? 'p3' : 'srgb'
+      renderer.p3Boost = p3BoostRef.current
       // Drive emissive contribution from the slider when bloom is on; cut to
       // zero when off so the scene shows pure Lambert color.
       const ei = bloomOn ? emissiveIntensityRef.current : 0
@@ -642,12 +642,20 @@ const IndexPage = () => {
           >
             Bloom {bloom ? 'ON' : 'OFF'}
           </button>
-          <button
-            onClick={() => setP3(v => !v)}
-            className={`cursor-pointer rounded px-3 py-1.5 ${p3 ? 'bg-emerald-500 text-black' : 'bg-white/10 text-white/80 hover:bg-white/20'}`}
+          <label
+            className={`flex items-center gap-2 rounded px-3 py-1.5 ${p3Boost > 0 ? 'bg-emerald-500 text-black' : 'bg-white/10 text-white/80'}`}
           >
-            P3 {p3 ? 'ON' : 'OFF'}
-          </button>
+            <span>P3 boost {p3Boost.toFixed(2)}</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={p3Boost}
+              onChange={e => setP3Boost(Number(e.target.value))}
+              className="w-24 cursor-pointer"
+            />
+          </label>
           <select
             value={toneMapping}
             onChange={e => setToneMapping(Number(e.target.value) as ToneMapping)}

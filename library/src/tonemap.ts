@@ -12,6 +12,8 @@
 // bypasses this pass entirely and renders straight to the canvas — the
 // "zero post-processing" fast path for weak devices.
 
+import { P3_BOOST_WGSL } from './shader-material'
+
 export const NoToneMapping = 0
 export const ACESFilmicToneMapping = 1
 export const SoftToneMapping = 2
@@ -39,11 +41,13 @@ struct VSOut {
 }
 `
 
-const COMPOSITE_FS = /* wgsl */ `
+const COMPOSITE_FS =
+  P3_BOOST_WGSL +
+  /* wgsl */ `
 @group(0) @binding(0) var sceneTex: texture_2d<f32>;
 @group(0) @binding(1) var bloomTex: texture_2d<f32>;
 @group(0) @binding(2) var smp: sampler;
-@group(0) @binding(3) var<uniform> params: vec4f; // x=bloomStrength, y=toneMapping mode
+@group(0) @binding(3) var<uniform> params: vec4f; // x=bloomStrength, y=toneMapping mode, z=p3Boost
 
 // ACES filmic tone map (Narkowicz approximation). HDR -> LDR with a
 // soft shoulder; keeps colored midtones, rolls off highlights to white.
@@ -144,7 +148,7 @@ fn tonemapNeutral(c: vec3f) -> vec3f {
   } else {
     mapped = saturate(combined);
   }
-  return vec4f(mapped, 1.0);
+  return vec4f(applyP3Boost(mapped, params.z), 1.0);
 }
 `
 
@@ -248,6 +252,7 @@ export class ToneMappingPass {
     bloomView: GPUTextureView | null,
     bloomStrength: number,
     toneMapping: ToneMapping,
+    p3Boost: number,
   ) {
     const bloom = bloomView ?? this.fallbackBloomView
     if (this.compositeBindGroup === null || bloom !== this._lastBloomView) {
@@ -265,6 +270,7 @@ export class ToneMappingPass {
 
     this.paramsStaging[0] = bloomView ? bloomStrength : 0
     this.paramsStaging[1] = toneMapping
+    this.paramsStaging[2] = p3Boost
     this.device.queue.writeBuffer(this.paramsBuffer, 0, this.paramsStaging as unknown as ArrayBuffer)
 
     const pass = encoder.beginRenderPass({
