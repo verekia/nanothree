@@ -72,7 +72,7 @@ animate()
 ### Renderer
 
 ```typescript
-const renderer = new WebGPURenderer({ canvas, antialias?: boolean })
+const renderer = new WebGPURenderer({ canvas, antialias: boolean })
 await renderer.init()
 renderer.render(scene, camera)
 renderer.setSize(width, height)

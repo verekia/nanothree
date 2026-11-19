@@ -15,7 +15,7 @@ Monorepo with two workspaces:
 
 ## Build / validation commands
 
-- `bun run typecheck` — root: `tsc -b --noEmit` across both workspaces. Library has its own `tsgo` typecheck via `library/package.json`.
+- `bun run typecheck` — root: `bun check`, which follows the project references into both workspaces.
 - `bun run all` — the full pre-commit gauntlet: `format:check`, `lint` (oxlint), `typecheck`, `warden`, and `bun test`. Run this before declaring work done.
 - `bun run --filter 'nanothree' build` (or `bun run pub`) — builds the library via tsup. Includes the decoder generation `prebuild` step.
 

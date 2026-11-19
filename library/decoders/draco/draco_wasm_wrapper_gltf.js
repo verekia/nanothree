@@ -133,7 +133,7 @@ $jscomp.polyfill(
       p(f, 0)
     }
     n.prototype.executeBatch_ = function () {
-      for (; this.batch_ && this.batch_.length; ) {
+      for (; this.batch_ && this.batch_.length;) {
         var f = this.batch_
         this.batch_ = []
         for (var q = 0; q < f.length; ++q) {
@@ -374,7 +374,7 @@ $jscomp.polyfill(
           var l = p.length,
             y = n.length
           k = Math.max(0, Math.min(k | 0, p.length))
-          for (var f = 0; f < y && k < l; ) if (p[k++] != n[f++]) return !1
+          for (var f = 0; f < y && k < l;) if (p[k++] != n[f++]) return !1
           return f >= y
         }
   },
@@ -398,9 +398,9 @@ $jscomp.polyfill(
           k = 0 > k ? Math.max(y + k, 0) : Math.min(k, y)
           p = 0 > p ? Math.max(y + p, 0) : Math.min(p, y)
           l = 0 > l ? Math.max(y + l, 0) : Math.min(l, y)
-          if (k < p) for (; p < l; ) p in this ? (this[k++] = this[p++]) : (delete this[k++], p++)
+          if (k < p) for (; p < l;) p in this ? (this[k++] = this[p++]) : (delete this[k++], p++)
           else
-            for (l = Math.min(l, y + p - k), k += l - p; l > p; ) --l in this ? (this[--k] = this[l]) : delete this[--k]
+            for (l = Math.min(l, y + p - k), k += l - p; l > p;) --l in this ? (this[--k] = this[l]) : delete this[--k]
           return this
         }
   },
@@ -430,10 +430,10 @@ var DracoDecoderModule = (function () {
       if (e) {
         var c = ia
         var d = e + b
-        for (b = e; c[b] && !(b >= d); ) ++b
+        for (b = e; c[b] && !(b >= d);) ++b
         if (16 < b - e && c.buffer && ra) c = ra.decode(c.subarray(e, b))
         else {
-          for (d = ''; e < b; ) {
+          for (d = ''; e < b;) {
             var g = c[e++]
             if (g & 128) {
               var t = c[e++] & 63
@@ -511,7 +511,7 @@ var DracoDecoderModule = (function () {
       })
     }
     function u(e) {
-      for (; 0 < e.length; ) e.shift()(a)
+      for (; 0 < e.length;) e.shift()(a)
     }
     function A(e) {
       this.excPtr = e
@@ -579,14 +579,14 @@ var DracoDecoderModule = (function () {
           wa(a)
           if (a.onRuntimeInitialized) a.onRuntimeInitialized()
           if (a.postRun)
-            for ('function' == typeof a.postRun && (a.postRun = [a.postRun]); a.postRun.length; )
+            for ('function' == typeof a.postRun && (a.postRun = [a.postRun]); a.postRun.length;)
               xa.unshift(a.postRun.shift())
           u(xa)
         }
       }
       if (!(0 < ba)) {
         if (a.preRun)
-          for ('function' == typeof a.preRun && (a.preRun = [a.preRun]); a.preRun.length; ) ya.unshift(a.preRun.shift())
+          for ('function' == typeof a.preRun && (a.preRun = [a.preRun]); a.preRun.length;) ya.unshift(a.preRun.shift())
         u(ya)
         0 < ba ||
           (a.setStatus
@@ -1427,7 +1427,7 @@ var DracoDecoderModule = (function () {
       la || (ha = b)
     }
     if (a.preInit)
-      for ('function' == typeof a.preInit && (a.preInit = [a.preInit]); 0 < a.preInit.length; ) a.preInit.pop()()
+      for ('function' == typeof a.preInit && (a.preInit = [a.preInit]); 0 < a.preInit.length;) a.preInit.pop()()
     F()
     v.prototype = Object.create(v.prototype)
     v.prototype.constructor = v

@@ -16,11 +16,10 @@
     "generate-decoders": "bun scripts/generate-inline-decoders.ts",
     "prebuild": "bun run generate-decoders",
     "build": "tsup && cp ../README.md README.md",
-    "typecheck": "tsgo"
+    "typecheck": "bun check"
   },
   "devDependencies": {
     "@types/bun": "1.3.8",
-    "@typescript/native-preview": "^7.0.0-dev.20260206.1",
     "@webgpu/types": "^0.1.69",
     "tsup": "8.5.1",
     "typescript": "6.0.3"
